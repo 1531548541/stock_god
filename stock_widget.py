@@ -13,8 +13,8 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QVBoxLayout,
                              QAction, QDialog, QListWidget, QLineEdit, QMessageBox,
                              QListWidgetItem, QAbstractItemView, QScrollArea,
                              QSlider, QSpinBox, QGridLayout)
-from PyQt5.QtCore import Qt, QTimer, QPoint
-from PyQt5.QtGui import QFont, QColor, QIcon
+from PyQt5.QtCore import Qt, QTimer, QPoint, QRegExp
+from PyQt5.QtGui import QFont, QColor, QIcon, QDoubleValidator, QIntValidator, QRegExpValidator
 
 # 导入matplotlib用于绘制图表
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -407,90 +407,104 @@ class TCalculatorDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle('做T计算器')
-        self.setFixedSize(300, 180)
+        self.setFixedSize(380, 200)
+        self.setStyleSheet('''
+            QDialog {
+                background-color: #ffffff;
+            }
+            QLineEdit {
+                border: 1px solid #e0e0e0;
+                border-radius: 4px;
+                padding: 4px 10px;
+                min-height: 12px;
+                font-size: 12px;
+                background-color: #fafafa;
+            }
+            QLineEdit:focus {
+                border: 1px solid #0078d4;
+                background-color: #ffffff;
+            }
+            QPushButton {
+                background-color: #0078d4;
+                color: #ffffff;
+                border: none;
+                padding: 6px 15px;
+                min-height: 28px;
+                font-size: 14px;
+                border-radius: 4px;
+                min-width: 70px;
+                max-width: 70px;
+            }
+            QPushButton:hover {
+                background-color: #106ebe;
+            }
+            QLabel {
+                font-size: 14px;
+                color: #000000;
+            }
+        ''')
         self.init_ui()
 
     def init_ui(self):
         """初始化界面"""
         layout = QVBoxLayout()
-        layout.setSpacing(15)
+        layout.setSpacing(12)
         layout.setContentsMargins(20, 20, 20, 20)
 
         # 输入区域
         input_layout = QGridLayout()
         input_layout.setSpacing(10)
+        input_layout.setColumnStretch(0, 0)
+        input_layout.setColumnStretch(1, 1)
 
         # 买入价
         buy_label = QLabel('买入价:')
-        buy_label.setStyleSheet('font-size: 14px; color: #000000;')
+        buy_label.setFixedWidth(55)
+        buy_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.buy_input = QLineEdit()
+        self.buy_input.setMinimumWidth(200)
+        self.buy_input.setMaximumWidth(250)
         self.buy_input.setPlaceholderText('请输入买入价格')
-        self.buy_input.setStyleSheet('''
-            QLineEdit {
-                font-size: 14px;
-                padding: 8px;
-                border: 1px solid #e0e0e0;
-                border-radius: 4px;
-                background-color: #ffffff;
-                color: #000000;
-            }
-            QLineEdit:focus {
-                border: 2px solid #0078d4;
-            }
-        ''')
+        self.buy_input.setValidator(QDoubleValidator(0.0, 1000000.0, 2))
         self.buy_input.textChanged.connect(self.calculate)
         input_layout.addWidget(buy_label, 0, 0)
         input_layout.addWidget(self.buy_input, 0, 1)
 
         # 卖出价
         sell_label = QLabel('卖出价:')
-        sell_label.setStyleSheet('font-size: 14px; color: #000000;')
+        sell_label.setFixedWidth(55)
+        sell_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.sell_input = QLineEdit()
+        self.sell_input.setMinimumWidth(200)
+        self.sell_input.setMaximumWidth(250)
         self.sell_input.setPlaceholderText('请输入卖出价格')
-        self.sell_input.setStyleSheet('''
-            QLineEdit {
-                font-size: 14px;
-                padding: 8px;
-                border: 1px solid #e0e0e0;
-                border-radius: 4px;
-                background-color: #ffffff;
-                color: #000000;
-            }
-            QLineEdit:focus {
-                border: 2px solid #0078d4;
-            }
-        ''')
+        self.sell_input.setValidator(QDoubleValidator(0.0, 1000000.0, 2))
         self.sell_input.textChanged.connect(self.calculate)
         input_layout.addWidget(sell_label, 1, 0)
         input_layout.addWidget(self.sell_input, 1, 1)
 
         # 数量
         quantity_label = QLabel('数量:')
-        quantity_label.setStyleSheet('font-size: 14px; color: #000000;')
+        quantity_label.setFixedWidth(55)
+        quantity_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.quantity_input = QLineEdit()
-        self.quantity_input.setPlaceholderText('请输入股票数量')
-        self.quantity_input.setStyleSheet('''
-            QLineEdit {
-                font-size: 14px;
-                padding: 8px;
-                border: 1px solid #e0e0e0;
-                border-radius: 4px;
-                background-color: #ffffff;
-                color: #000000;
-            }
-            QLineEdit:focus {
-                border: 2px solid #0078d4;
-            }
-        ''')
+        self.quantity_input.setMinimumWidth(200)
+        self.quantity_input.setMaximumWidth(250)
+        self.quantity_input.setPlaceholderText('请输入数量(自动乘100)')
+        self.quantity_input.setValidator(QRegExpValidator(QRegExp('^[0-9]*$')))
         self.quantity_input.textChanged.connect(self.calculate)
         input_layout.addWidget(quantity_label, 2, 0)
         input_layout.addWidget(self.quantity_input, 2, 1)
+        
+        # 数量单位提示
+        unit_label = QLabel('×100股')
+        unit_label.setStyleSheet('font-size: 12px; color: #999;')
+        input_layout.addWidget(unit_label, 2, 2)
 
         layout.addLayout(input_layout)
 
         # 结果显示
         self.result_label = QLabel('盈亏: ¥0.00 (0.00%)')
-        self.result_label.setStyleSheet('font-size: 16px; font-weight: bold; color: #000000;')
         layout.addWidget(self.result_label, alignment=Qt.AlignCenter)
 
         # 按钮区域
@@ -498,36 +512,10 @@ class TCalculatorDialog(QDialog):
         btn_layout.addStretch()
 
         self.clear_btn = QPushButton('清空')
-        self.clear_btn.setStyleSheet('''
-            QPushButton {
-                font-size: 14px;
-                padding: 8px 20px;
-                background-color: #0078d4;
-                color: #ffffff;
-                border: none;
-                border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #106ebe;
-            }
-        ''')
         self.clear_btn.clicked.connect(self.clear)
         btn_layout.addWidget(self.clear_btn)
 
         self.close_btn = QPushButton('关闭')
-        self.close_btn.setStyleSheet('''
-            QPushButton {
-                font-size: 14px;
-                padding: 8px 20px;
-                background-color: #6c757d;
-                color: #ffffff;
-                border: none;
-                border-radius: 4px;
-            }
-            QPushButton:hover {
-                background-color: #5a6268;
-            }
-        ''')
         self.close_btn.clicked.connect(self.accept)
         btn_layout.addWidget(self.close_btn)
 
@@ -539,7 +527,7 @@ class TCalculatorDialog(QDialog):
         try:
             buy_price = float(self.buy_input.text()) if self.buy_input.text() else 0
             sell_price = float(self.sell_input.text()) if self.sell_input.text() else 0
-            quantity = int(self.quantity_input.text()) if self.quantity_input.text() else 0
+            quantity = int(self.quantity_input.text()) * 100 if self.quantity_input.text() else 0
 
             if buy_price > 0 and sell_price > 0 and quantity > 0:
                 profit = (sell_price - buy_price) * quantity
@@ -553,10 +541,30 @@ class TCalculatorDialog(QDialog):
                     sign = ''
 
                 self.result_label.setText(f'盈亏: {sign}¥{profit:.2f} ({sign}{profit_percent:.2f}%)')
+                self.result_label.setStyleSheet(f'font-size: 16px; font-weight: bold; color: {color};')
             else:
                 self.result_label.setText('盈亏: ¥0.00 (0.00%)')
+                self.result_label.setStyleSheet('font-size: 16px; font-weight: bold; color: #000000;')
         except ValueError:
             self.result_label.setText('盈亏: ¥0.00 (0.00%)')
+            self.result_label.setStyleSheet('font-size: 16px; font-weight: bold; color: #000000;')
+
+    def on_quantity_changed(self):
+        """数量输入变化处理，自动调整为100的倍数"""
+        text = self.quantity_input.text()
+        if text:
+            try:
+                num = int(text)
+                if num > 0:
+                    rounded = (num // 100) * 100
+                    if rounded == 0:
+                        rounded = 100
+                    self.quantity_input.blockSignals(True)
+                    self.quantity_input.setText(str(rounded))
+                    self.quantity_input.blockSignals(False)
+                self.calculate()
+            except ValueError:
+                pass
 
     def clear(self):
         """清空输入"""
@@ -733,136 +741,6 @@ class StockDetailDialog(QDialog):
 
         self.figure.autofmt_xdate()
         self.canvas.draw()
-
-
-class TCalculatorDialog(QDialog):
-    """做T计算器对话框"""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle('做T计算器')
-        self.setFixedSize(300, 180)
-        self.setStyleSheet('''
-            QDialog {
-                background-color: #ffffff;
-            }
-            QLabel {
-                color: #000000;
-                font-size: 14px;
-            }
-            QLineEdit {
-                border: 1px solid #e0e0e0;
-                border-radius: 4px;
-                padding: 6px 10px;
-                font-size: 13px;
-                background-color: #fafafa;
-            }
-            QLineEdit:focus {
-                border: 1px solid #0078d4;
-            }
-            QPushButton {
-                background-color: #0078d4;
-                color: #ffffff;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 4px;
-                font-size: 13px;
-            }
-            QPushButton:hover {
-                background-color: #106ebe;
-            }
-        ''')
-        self.init_ui()
-
-    def init_ui(self):
-        """初始化界面"""
-        layout = QVBoxLayout()
-        layout.setSpacing(15)
-        layout.setContentsMargins(20, 20, 20, 20)
-
-        # 输入区域
-        input_layout = QGridLayout()
-        input_layout.setSpacing(10)
-
-        # 买入价
-        buy_label = QLabel('买入价:')
-        self.buy_input = QLineEdit()
-        self.buy_input.setPlaceholderText('请输入买入价格')
-        self.buy_input.textChanged.connect(self.calculate)
-        input_layout.addWidget(buy_label, 0, 0)
-        input_layout.addWidget(self.buy_input, 0, 1)
-
-        # 卖出价
-        sell_label = QLabel('卖出价:')
-        self.sell_input = QLineEdit()
-        self.sell_input.setPlaceholderText('请输入卖出价格')
-        self.sell_input.textChanged.connect(self.calculate)
-        input_layout.addWidget(sell_label, 1, 0)
-        input_layout.addWidget(self.sell_input, 1, 1)
-
-        # 数量
-        quantity_label = QLabel('数量:')
-        self.quantity_input = QLineEdit()
-        self.quantity_input.setPlaceholderText('请输入股票数量')
-        self.quantity_input.textChanged.connect(self.calculate)
-        input_layout.addWidget(quantity_label, 2, 0)
-        input_layout.addWidget(self.quantity_input, 2, 1)
-
-        layout.addLayout(input_layout)
-
-        # 结果显示
-        self.result_label = QLabel('盈亏: ¥0.00 (0.00%)')
-        self.result_label.setStyleSheet('font-size: 14px; font-weight: bold; color: #888888;')
-        layout.addWidget(self.result_label, alignment=Qt.AlignCenter)
-
-        # 按钮区域
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-
-        self.clear_btn = QPushButton('清空')
-        self.clear_btn.clicked.connect(self.clear)
-        btn_layout.addWidget(self.clear_btn)
-
-        self.close_btn = QPushButton('关闭')
-        self.close_btn.clicked.connect(self.accept)
-        btn_layout.addWidget(self.close_btn)
-
-        layout.addLayout(btn_layout)
-        self.setLayout(layout)
-
-    def calculate(self):
-        """计算做T盈亏"""
-        try:
-            buy_price = float(self.buy_input.text()) if self.buy_input.text() else 0
-            sell_price = float(self.sell_input.text()) if self.sell_input.text() else 0
-            quantity = int(self.quantity_input.text()) if self.quantity_input.text() else 0
-
-            if buy_price > 0 and sell_price > 0 and quantity > 0:
-                profit = (sell_price - buy_price) * quantity
-                profit_percent = (sell_price - buy_price) / buy_price * 100
-
-                if profit >= 0:
-                    color = '#ff4d4f'
-                    sign = '+'
-                else:
-                    color = '#52c41a'
-                    sign = ''
-
-                self.result_label.setText(f'盈亏: {sign}¥{profit:.2f} ({sign}{profit_percent:.2f}%)')
-                self.result_label.setStyleSheet(f'font-size: 14px; font-weight: bold; color: {color};')
-            else:
-                self.result_label.setText('盈亏: ¥0.00 (0.00%)')
-                self.result_label.setStyleSheet('font-size: 14px; font-weight: bold; color: #888888;')
-        except ValueError:
-            self.result_label.setText('盈亏: ¥0.00 (0.00%)')
-            self.result_label.setStyleSheet('font-size: 14px; font-weight: bold; color: #888888;')
-
-    def clear(self):
-        """清空输入"""
-        self.buy_input.clear()
-        self.sell_input.clear()
-        self.quantity_input.clear()
-        self.calculate()
 
 
 class StockDesktopWidget(QWidget):
