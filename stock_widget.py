@@ -75,10 +75,11 @@ class StockInfoWidget:
 class StockManageDialog(QDialog):
     """股票管理对话框 - 支持添加、删除、搜索股票"""
 
-    def __init__(self, current_stocks: list, parent=None):
+    def __init__(self, current_stocks: list, pinned_stocks: set = None, parent=None):
         super().__init__(parent)
         self.current_stocks = current_stocks[:]  # 复制一份
         self.stock_names = {}  # 存储代码到名称的映射
+        self.pinned_stocks = pinned_stocks.copy() if pinned_stocks else set()  # 存储置顶的股票代码
         self.search_results = []
         self.load_stock_names()  # 先加载股票名称
         self.init_ui()
@@ -179,6 +180,10 @@ class StockManageDialog(QDialog):
         # 按钮区域
         btn_layout = QHBoxLayout()
 
+        self.pin_btn = QPushButton('📌 置顶')
+        self.pin_btn.clicked.connect(self.pin_to_top)
+        btn_layout.addWidget(self.pin_btn)
+
         self.add_btn = QPushButton('➕ 添加选中')
         self.add_btn.clicked.connect(self.add_selected_stock)
         btn_layout.addWidget(self.add_btn)
@@ -209,14 +214,21 @@ class StockManageDialog(QDialog):
         self.result_list.clear()
         self.search_results = []
 
-        # 先尝试直接输入股票代码
-        if len(keyword) == 6 and keyword.isdigit():
-            self.search_results.append({'code': keyword, 'name': '直接添加', 'pinyin': ''})
-        else:
-            # 调用父窗口的搜索方法
-            parent = self.parent()
-            if parent and hasattr(parent, 'search_stocks'):
-                self.search_results = parent.search_stocks(keyword)
+        # 调用父窗口的搜索方法获取股票名称
+        parent = self.parent()
+        if parent and hasattr(parent, 'search_stocks'):
+            self.search_results = parent.search_stocks(keyword)
+
+        # 如果没有搜索结果，且输入是6位数字，尝试直接获取股票信息
+        if not self.search_results and len(keyword) == 6 and keyword.isdigit():
+            # 通过API获取股票名称
+            if parent and hasattr(parent, 'get_stock_price'):
+                stock_info = parent.get_stock_price(keyword)
+                if stock_info:
+                    self.search_results.append({'code': keyword, 'name': stock_info.name, 'pinyin': ''})
+                else:
+                    # API失败时也允许添加
+                    self.search_results.append({'code': keyword, 'name': f'{keyword}(待获取)', 'pinyin': ''})
 
         # 显示搜索结果
         for item in self.search_results[:20]:  # 最多显示20条
@@ -235,7 +247,10 @@ class StockManageDialog(QDialog):
             code = self.search_results[row]['code']
             name = self.search_results[row]['name']
             if code not in self.current_stocks:
-                self.current_stocks.append(code)
+                # 计算置顶股票数量，新增股票插入到置顶股票之后
+                pinned_count = sum(1 for s in self.current_stocks if s in self.pinned_stocks)
+                insert_pos = pinned_count  # 插入到置顶股票之后
+                self.current_stocks.insert(insert_pos, code)
                 self.stock_names[code] = name
                 self.refresh_current_list()
                 QMessageBox.information(self, '成功', f'已添加股票: {code} - {name}')
@@ -257,18 +272,66 @@ class StockManageDialog(QDialog):
             self.current_stocks.remove(code)
             if code in self.stock_names:
                 del self.stock_names[code]
+            # 从置顶集合中移除
+            if code in self.pinned_stocks:
+                self.pinned_stocks.remove(code)
             self.refresh_current_list()
+
+    def pin_to_top(self):
+        """切换股票置顶状态"""
+        current_item = self.current_list.currentItem()
+        if not current_item:
+            QMessageBox.warning(self, '提示', '请先选择要置顶的股票')
+            return
+
+        # 从 "代码 - 名称" 格式中提取代码（处理可能的置顶图标）
+        text = current_item.text()
+        code = text.split(' - ')[0] if ' - ' in text else text
+        code = code.replace('📌 ', '').strip()  # 移除置顶图标
+
+        if code in self.current_stocks:
+            # 计算当前置顶股票数量
+            pinned_count = sum(1 for s in self.current_stocks if s in self.pinned_stocks)
+            current_row = self.current_list.currentRow()
+
+            # 如果已经置顶，则取消置顶
+            if code in self.pinned_stocks:
+                self.pinned_stocks.remove(code)
+                # 将股票移到置顶区域之后
+                self.current_stocks.remove(code)
+                self.current_stocks.insert(pinned_count - 1, code)
+                self.refresh_current_list()
+                # 重新选中该项
+                self.current_list.setCurrentRow(pinned_count - 1)
+            else:
+                # 添加到置顶集合，并移到置顶区域末尾
+                self.pinned_stocks.add(code)
+                self.current_stocks.remove(code)
+                self.current_stocks.insert(pinned_count, code)
+                self.refresh_current_list()
+                # 重新选中置顶的项
+                self.current_list.setCurrentRow(pinned_count)
 
     def get_stocks(self):
         """获取更新后的股票列表"""
         return self.current_stocks
+
+    def get_pinned_stocks(self):
+        """获取置顶的股票集合"""
+        return self.pinned_stocks
 
     def refresh_current_list(self):
         """刷新当前股票列表显示"""
         self.current_list.clear()
         for code in self.current_stocks:
             name = self.stock_names.get(code, code)
-            self.current_list.addItem(f'{code} - {name}')
+            # 置顶股票添加图标
+            prefix = '📌 ' if code in self.pinned_stocks else ''
+            item = QListWidgetItem(f'{prefix}{code} - {name}')
+            # 置顶股票设置灰色背景
+            if code in self.pinned_stocks:
+                item.setBackground(QColor(224, 224, 224))
+            self.current_list.addItem(item)
 
     def on_rows_moved(self, parent, start, end, destination, row):
         """拖拽排序后更新股票列表顺序"""
@@ -276,7 +339,9 @@ class StockManageDialog(QDialog):
         new_order = []
         for i in range(self.current_list.count()):
             item_text = self.current_list.item(i).text()
+            # 移除置顶图标后提取代码
             code = item_text.split(' - ')[0] if ' - ' in item_text else item_text
+            code = code.replace('📌 ', '').strip()  # 移除置顶图标
             if code in self.current_stocks:
                 new_order.append(code)
 
@@ -784,14 +849,20 @@ class StockDetailDialog(QDialog):
     def load_from_sina_api(self):
         """从新浪API加载基础数据并生成模拟数据"""
         try:
-            code_prefix = "sh" if self.stock_code.startswith("6") else "sz"
-            api_url = f"http://hq.sinajs.cn/list={code_prefix}{self.stock_code}"
+            # 判断代码是否已包含前缀
+            if self.stock_code.startswith('sh') or self.stock_code.startswith('sz'):
+                code_with_prefix = self.stock_code
+            else:
+                code_prefix = "sh" if self.stock_code.startswith("6") else "sz"
+                code_with_prefix = f"{code_prefix}{self.stock_code}"
+
+            api_url = f"http://hq.sinajs.cn/list={code_with_prefix}"
 
             response = requests.get(api_url, timeout=5)
-            response.encoding = 'gbk'
 
             if response.status_code == 200:
-                content = response.text.strip()
+                # 手动解码GBK编码的响应
+                content = response.content.decode('gbk').strip()
                 if '=' in content and '"' in content:
                     data_str = content.split('"')[1]
                     parts = data_str.split(',')
@@ -805,7 +876,7 @@ class StockDetailDialog(QDialog):
                         return
         except Exception as e:
             print(f"从新浪API加载数据失败: {e}")
-        
+
         # 最终使用默认模拟数据
         self.generate_mock_intraday_data(100.0, 101.0)
         self.plot_charts(101.5, 100.0, 101.0)
@@ -1483,6 +1554,7 @@ class StockDesktopWidget(QWidget):
     def __init__(self):
         super().__init__()
         self.stocks = []
+        self.pinned_stocks = set()  # 置顶的股票代码
         self.stock_widgets = []
         self.drag_position = None
         self.window_opacity = 0.85  # 默认透明度
@@ -1625,6 +1697,7 @@ class StockDesktopWidget(QWidget):
             with open('config.json', 'r', encoding='utf-8') as f:
                 config = json.load(f)
             self.stocks = config.get('stocks', [])
+            self.pinned_stocks = set(config.get('pinned', []))
             self.window_opacity = config.get('opacity', 0.85)
             self.refresh_interval = config.get('refresh_interval', 5)
             # 应用加载的设置
@@ -1632,6 +1705,7 @@ class StockDesktopWidget(QWidget):
         except:
             # 默认股票和设置
             self.stocks = ['600519', '000001', '600036']
+            self.pinned_stocks = set()
             self.window_opacity = 0.85
             self.refresh_interval = 5
 
@@ -1640,6 +1714,7 @@ class StockDesktopWidget(QWidget):
         try:
             config = {
                 'stocks': self.stocks,
+                'pinned': list(self.pinned_stocks),
                 'opacity': self.window_opacity,
                 'refresh_interval': self.refresh_interval
             }
@@ -1650,9 +1725,10 @@ class StockDesktopWidget(QWidget):
 
     def show_manage_dialog(self):
         """显示股票管理对话框"""
-        dialog = StockManageDialog(self.stocks, self)
+        dialog = StockManageDialog(self.stocks, self.pinned_stocks, self)
         if dialog.exec_() == QDialog.Accepted:
             self.stocks = dialog.get_stocks()
+            self.pinned_stocks = dialog.get_pinned_stocks()
             self.save_config()
             self.update_stock_display()
 
@@ -1685,10 +1761,10 @@ class StockDesktopWidget(QWidget):
             # type=11:沪深A股, type=12:指数
             api_url = f"http://suggest3.sinajs.cn/suggest/type=11,12,13,14,15&key={keyword}&name=suggestdata"
             response = requests.get(api_url, timeout=5)
-            response.encoding = 'gbk'
 
             if response.status_code == 200:
-                content = response.text.strip()
+                # 手动解码GBK编码的响应
+                content = response.content.decode('gbk').strip()
                 # 格式: var suggestdata="..."
                 if 'suggestdata="' in content:
                     data_str = content.split('suggestdata="')[1].split('";')[0]
@@ -1702,7 +1778,15 @@ class StockDesktopWidget(QWidget):
                                 # parts[0]=名称, parts[1]=类型, parts[2]=6位代码
                                 code = parts[2]
                                 name = parts[0]
-                                if len(code) == 6 and code.isdigit():
+                                # 跳过名称为空的股票
+                                if len(code) == 6 and code.isdigit() and name and name.strip():
+                                    # 检测name是否是代码格式(如sh600893)，如果是则获取真实名称
+                                    if name.startswith('sh') or name.startswith('sz'):
+                                        stock_info = self.get_stock_price(code)
+                                        if stock_info:
+                                            name = stock_info.name
+                                        else:
+                                            name = code  # fallback
                                     results.append({
                                         'code': code,
                                         'name': name,
@@ -1715,14 +1799,20 @@ class StockDesktopWidget(QWidget):
     def get_stock_price(self, stock_code: str):
         """获取股票实时价格（腾讯API）"""
         try:
-            code_prefix = "sh" if stock_code.startswith("6") else "sz"
-            api_url = f"http://qt.gtimg.cn/q={code_prefix}{stock_code}"
+            # 判断代码是否已包含前缀
+            if stock_code.startswith('sh') or stock_code.startswith('sz'):
+                code_with_prefix = stock_code
+            else:
+                code_prefix = "sh" if stock_code.startswith("6") else "sz"
+                code_with_prefix = f"{code_prefix}{stock_code}"
+
+            api_url = f"http://qt.gtimg.cn/q={code_with_prefix}"
 
             response = requests.get(api_url, timeout=5)
-            response.encoding = 'gbk'
 
             if response.status_code == 200:
-                content = response.text.strip()
+                # 手动解码GBK编码的响应
+                content = response.content.decode('gbk').strip()
                 if '~' in content:
                     data = content.split('~')
                     if len(data) > 32:
