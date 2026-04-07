@@ -1870,8 +1870,8 @@ class StockDesktopWidget(QWidget):
 
         # 主布局（包含标题栏+滚动区域）
         self.main_layout = QVBoxLayout()
-        self.main_layout.setSpacing(5)
-        self.main_layout.setContentsMargins(15, 15, 15, 15)
+        self.main_layout.setSpacing(0)
+        self.main_layout.setContentsMargins(15, 10, 15, 10)
 
         # 标题栏
         title_layout = QHBoxLayout()
@@ -2000,7 +2000,7 @@ class StockDesktopWidget(QWidget):
         # === 分组标签栏 ===
         tab_bar = QHBoxLayout()
         tab_bar.setSpacing(2)
-        tab_bar.setContentsMargins(0, 2, 0, 2)
+        tab_bar.setContentsMargins(0, 0, 0, 0)
 
         self._group_btns = []
         btn_all = QPushButton('全部')
@@ -2046,7 +2046,7 @@ class StockDesktopWidget(QWidget):
         # 滚动内容的容器
         self.scroll_content = QWidget()
         self.content_layout = QVBoxLayout()
-        self.content_layout.setSpacing(5)
+        self.content_layout.setSpacing(2)
         self.content_layout.setContentsMargins(0, 0, 0, 0)
         self.scroll_content.setLayout(self.content_layout)
         self.scroll_area.setWidget(self.scroll_content)
@@ -2132,9 +2132,48 @@ class StockDesktopWidget(QWidget):
             self._rebuild_group_tabs()
             self._switch_group(name)
 
+    def _show_group_menu(self, pos, name, btn):
+        """分组标签右键菜单"""
+        menu = QMenu(self)
+        menu.setStyleSheet('''
+            QMenu { background-color: #ffffff; border: 1px solid #e0e0e0; padding: 4px 0px; }
+            QMenu::item { padding: 6px 28px; color: #333333; }
+            QMenu::item:selected { background-color: #0078d4; color: #ffffff; }
+        ''')
+        rename_action = menu.addAction('重命名')
+        menu.addSeparator()
+        del_action = menu.addAction('删除分组')
+        action = menu.exec_(btn.mapToGlobal(pos))
+        if action == rename_action:
+            self._rename_group(name)
+        elif action == del_action:
+            self._remove_group(name)
+
+    def _rename_group(self, old_name):
+        """重命名分组"""
+        new_name, ok = _chinese_input_dialog(self, '重命名分组', '新名称：', old_name)
+        if ok and new_name and new_name != old_name:
+            if new_name in self.groups or new_name == '全部':
+                return
+            codes = self.groups.pop(old_name)
+            self.groups[new_name] = codes
+            if self._current_group == old_name:
+                self._current_group = new_name
+            self.save_config()
+            self._rebuild_group_tabs()
+
     def _remove_group(self, name):
         """删除分组"""
         if name in self.groups:
+            msg = QMessageBox(self)
+            msg.setWindowTitle('删除分组')
+            msg.setText(f'确定删除分组「{name}」吗？\n该分组下的股票不会被删除。')
+            msg.setIcon(QMessageBox.Question)
+            yes_btn = msg.addButton('确定', QMessageBox.YesRole)
+            msg.addButton('取消', QMessageBox.NoRole)
+            msg.exec_()
+            if msg.clickedButton() != yes_btn:
+                return
             del self.groups[name]
             self.save_config()
             self._rebuild_group_tabs()
@@ -2164,9 +2203,9 @@ class StockDesktopWidget(QWidget):
                 QPushButton:checked { background: #0078d4; color: #ffffff; border-radius: 2px; }
             ''')
             btn.clicked.connect(lambda _, n=name: self._switch_group(n))
-            # 右键删除分组
+            # 右键菜单：重命名/删除
             btn.setContextMenuPolicy(Qt.CustomContextMenu)
-            btn.customContextMenuRequested.connect(lambda _, n=name: self._remove_group(n))
+            btn.customContextMenuRequested.connect(lambda pos, n=name, b=btn: self._show_group_menu(pos, n, b))
             self._tab_bar_layout.insertWidget(insert_idx + i, btn)
             self._group_btns.append((name, btn))
 
@@ -2357,9 +2396,12 @@ class StockDesktopWidget(QWidget):
 
     def update_stock_display(self):
         """更新股票显示"""
-        # 清除旧的股票标签
-        for widget in self.stock_widgets:
-            widget.deleteLater()
+        # 清空整个 content_layout（包括旧的 stretch）
+        while self.content_layout.count():
+            item = self.content_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
         self.stock_widgets.clear()
 
         # 添加标题行
