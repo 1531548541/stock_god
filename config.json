@@ -16,5 +16,11 @@
     "sh000001"
   ],
   "opacity": 0.5,
-  "refresh_interval": 5
+  "refresh_interval": 5,
+  "alerts": [],
+  "groups": {
+    "长线": [
+      "600206"
+    ]
+  }
 }

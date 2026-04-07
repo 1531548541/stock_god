@@ -7,12 +7,13 @@
 import sys
 import json
 import requests
+from kline_chart import KLineDialog
 from datetime import datetime
 from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QVBoxLayout,
                              QHBoxLayout, QPushButton, QSystemTrayIcon, QMenu,
                              QAction, QDialog, QListWidget, QLineEdit, QMessageBox,
                              QListWidgetItem, QAbstractItemView, QScrollArea,
-                             QSlider, QSpinBox, QGridLayout)
+                             QSlider, QSpinBox, QGridLayout, QComboBox, QInputDialog)
 from PyQt5.QtCore import Qt, QTimer, QPoint, QRegExp
 from PyQt5.QtGui import QFont, QColor, QIcon, QDoubleValidator, QIntValidator, QRegExpValidator
 
@@ -40,6 +41,91 @@ plt.rcParams['grid.linestyle'] = '-'
 plt.rcParams['grid.linewidth'] = 0.5
 
 
+def _chinese_input_dialog(parent, title, label, text=''):
+    """自定义输入弹窗，中文按钮"""
+    dialog = QDialog(parent)
+    dialog.setWindowTitle(title)
+    dialog.setFixedSize(300, 120)
+    dialog.setStyleSheet('''
+        QDialog { background-color: #ffffff; }
+        QLabel { font-size: 13px; }
+        QLineEdit { padding: 6px; font-size: 13px; border: 1px solid #ccc; border-radius: 4px; }
+        QPushButton { padding: 6px 20px; border-radius: 4px; font-size: 13px; }
+    ''')
+    layout = QVBoxLayout(dialog)
+    layout.addWidget(QLabel(label))
+    inp = QLineEdit(text)
+    layout.addWidget(inp)
+    btn_row = QHBoxLayout()
+    btn_row.addStretch()
+    ok_btn = QPushButton('确定')
+    ok_btn.setStyleSheet('background: #0078d4; color: white;')
+    cancel_btn = QPushButton('取消')
+    cancel_btn.setStyleSheet('background: #e0e0e0;')
+    btn_row.addWidget(ok_btn)
+    btn_row.addWidget(cancel_btn)
+    layout.addLayout(btn_row)
+
+    result = [None, False]
+
+    def on_ok():
+        result[0] = inp.text().strip()
+        result[1] = True
+        dialog.accept()
+
+    def on_cancel():
+        dialog.reject()
+
+    ok_btn.clicked.connect(on_ok)
+    cancel_btn.clicked.connect(on_cancel)
+    inp.returnPressed.connect(on_ok)
+    dialog.exec_()
+    return result[0], result[1]
+
+
+def _chinese_select_dialog(parent, title, label, items, current=0):
+    """自定义选择弹窗，中文按钮"""
+    dialog = QDialog(parent)
+    dialog.setWindowTitle(title)
+    dialog.setFixedSize(300, 140)
+    dialog.setStyleSheet('''
+        QDialog { background-color: #ffffff; }
+        QLabel { font-size: 13px; }
+        QComboBox { padding: 6px; font-size: 13px; border: 1px solid #ccc; border-radius: 4px; }
+        QPushButton { padding: 6px 20px; border-radius: 4px; font-size: 13px; }
+    ''')
+    layout = QVBoxLayout(dialog)
+    layout.addWidget(QLabel(label))
+    combo = QComboBox()
+    combo.addItems(items)
+    combo.setCurrentIndex(current)
+    layout.addWidget(combo)
+    btn_row = QHBoxLayout()
+    btn_row.addStretch()
+    ok_btn = QPushButton('确定')
+    ok_btn.setStyleSheet('background: #0078d4; color: white;')
+    cancel_btn = QPushButton('取消')
+    cancel_btn.setStyleSheet('background: #e0e0e0;')
+    btn_row.addWidget(ok_btn)
+    btn_row.addWidget(cancel_btn)
+    layout.addLayout(btn_row)
+
+    result = [None, False]
+
+    def on_ok():
+        result[0] = combo.currentText()
+        result[1] = True
+        dialog.accept()
+
+    def on_cancel():
+        dialog.reject()
+
+    ok_btn.clicked.connect(on_ok)
+    cancel_btn.clicked.connect(on_cancel)
+    dialog.exec_()
+    return result[0], result[1]
+
+
 class ClickableLabel(QLabel):
     """可点击的标签，用于显示股票信息"""
 
@@ -48,16 +134,23 @@ class ClickableLabel(QLabel):
         self.stock_code = stock_code
         self.stock_name = stock_name
         self.callback = None
+        self.right_callback = None
 
     def mousePressEvent(self, event):
         """鼠标点击事件"""
         if event.button() == Qt.LeftButton and self.callback:
             self.callback(self.stock_code, self.stock_name)
+        elif event.button() == Qt.RightButton and self.right_callback:
+            self.right_callback(self.stock_code, self.stock_name)
         super().mousePressEvent(event)
 
     def set_clicked_callback(self, callback):
         """设置点击回调函数"""
         self.callback = callback
+
+    def set_right_callback(self, callback):
+        """设置右键回调函数"""
+        self.right_callback = callback
 
 
 class StockInfoWidget:
@@ -70,16 +163,23 @@ class StockInfoWidget:
         self.change = change
         self.change_percent = change_percent
         self.open_price = open_price
+        # 五档买卖盘
+        self.bid_prices = [0.0] * 5
+        self.bid_vols = [0] * 5
+        self.ask_prices = [0.0] * 5
+        self.ask_vols = [0] * 5
 
 
 class StockManageDialog(QDialog):
     """股票管理对话框 - 支持添加、删除、搜索股票"""
 
-    def __init__(self, current_stocks: list, pinned_stocks: set = None, parent=None):
+    def __init__(self, current_stocks: list, pinned_stocks: set = None,
+                 groups: dict = None, parent=None):
         super().__init__(parent)
         self.current_stocks = current_stocks[:]  # 复制一份
         self.stock_names = {}  # 存储代码到名称的映射
         self.pinned_stocks = pinned_stocks.copy() if pinned_stocks else set()  # 存储置顶的股票代码
+        self.groups = dict(groups) if groups else {}  # 复制分组
         self.search_results = []
         self.load_stock_names()  # 先加载股票名称
         self.init_ui()
@@ -141,6 +241,19 @@ class StockManageDialog(QDialog):
             QLineEdit:focus {
                 border: 1px solid #0078d4;
             }
+            QMenu {
+                background-color: #ffffff;
+                border: 1px solid #e0e0e0;
+                padding: 4px 0px;
+            }
+            QMenu::item {
+                padding: 6px 28px;
+                color: #333333;
+            }
+            QMenu::item:selected {
+                background-color: #0078d4;
+                color: #ffffff;
+            }
         ''')
 
         layout = QVBoxLayout()
@@ -156,6 +269,8 @@ class StockManageDialog(QDialog):
         self.current_list.setDragDropMode(QAbstractItemView.InternalMove)
         self.current_list.setDefaultDropAction(Qt.MoveAction)
         self.current_list.model().rowsMoved.connect(self.on_rows_moved)
+        self.current_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.current_list.customContextMenuRequested.connect(self._show_stock_menu)
         self.refresh_current_list()
         layout.addWidget(self.current_list)
 
@@ -179,10 +294,6 @@ class StockManageDialog(QDialog):
 
         # 按钮区域
         btn_layout = QHBoxLayout()
-
-        self.pin_btn = QPushButton('📌 置顶')
-        self.pin_btn.clicked.connect(self.pin_to_top)
-        btn_layout.addWidget(self.pin_btn)
 
         self.add_btn = QPushButton('➕ 添加选中')
         self.add_btn.clicked.connect(self.add_selected_stock)
@@ -275,7 +386,43 @@ class StockManageDialog(QDialog):
             # 从置顶集合中移除
             if code in self.pinned_stocks:
                 self.pinned_stocks.remove(code)
+            # 从所有分组中移除
+            for grp in self.groups.values():
+                if code in grp:
+                    grp.remove(code)
             self.refresh_current_list()
+
+    def _show_stock_menu(self, pos):
+        """右键菜单"""
+        item = self.current_list.itemAt(pos)
+        if not item:
+            return
+        text = item.text()
+        code = text.split(' - ')[0] if ' - ' in text else text
+        code = code.replace('📌 ', '').strip()
+
+        menu = QMenu(self)
+        is_pinned = code in self.pinned_stocks
+        pin_action = menu.addAction('取消置顶' if is_pinned else '📌 置顶')
+        menu.addSeparator()
+
+        # 分组子菜单
+        if self.groups:
+            grp_menu = menu.addMenu('加入分组')
+            for grp_name, grp_codes in self.groups.items():
+                if code in grp_codes:
+                    act = grp_menu.addAction(f'✓ {grp_name}')
+                else:
+                    act = grp_menu.addAction(grp_name)
+                act.setData((code, grp_name))
+
+        action = menu.exec_(self.current_list.mapToGlobal(pos))
+        if action == pin_action:
+            self.pin_to_top()
+        elif action and action.data():
+            c, g = action.data()
+            if c not in self.groups[g]:
+                self.groups[g].append(c)
 
     def pin_to_top(self):
         """切换股票置顶状态"""
@@ -319,6 +466,10 @@ class StockManageDialog(QDialog):
     def get_pinned_stocks(self):
         """获取置顶的股票集合"""
         return self.pinned_stocks
+
+    def get_groups(self):
+        """获取更新后的分组"""
+        return self.groups
 
     def refresh_current_list(self):
         """刷新当前股票列表显示"""
@@ -480,6 +631,361 @@ class SettingsDialog(QDialog):
     def get_settings(self):
         """获取设置"""
         return self.opacity, self.interval_spinbox.value()
+
+
+class AlertDialog(QDialog):
+    """价格预警设置对话框"""
+
+    _C_BG = '#161a25'
+    _C_GRID = '#1e222d'
+    _C_DIM = '#787b86'
+    _C_TEXT = '#d1d4dc'
+    _C_UP = '#ef5350'
+    _C_DOWN = '#26a69a'
+
+    def __init__(self, alerts: list, stock_codes: list, parent=None):
+        super().__init__(parent)
+        self.alerts = alerts[:]  # 复制一份
+        self.stock_codes = stock_codes
+        self.init_ui()
+        self._refresh_list()
+
+    def init_ui(self):
+        self.setWindowTitle('价格预警')
+        self.setFixedSize(480, 420)
+        self.setStyleSheet(f'''
+            QDialog {{ background-color: {self._C_BG}; }}
+            QLabel {{ color: {self._C_TEXT}; font-size: 13px; font-family: "Microsoft YaHei"; }}
+            QLineEdit {{
+                background-color: {self._C_GRID}; color: {self._C_TEXT};
+                border: 1px solid #2a2e39; border-radius: 4px;
+                padding: 6px 10px; font-size: 13px;
+            }}
+            QLineEdit:focus {{ border: 1px solid #2962ff; }}
+            QComboBox {{
+                background-color: {self._C_GRID}; color: {self._C_TEXT};
+                border: 1px solid #2a2e39; border-radius: 4px;
+                padding: 6px 10px; font-size: 13px;
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: {self._C_GRID}; color: {self._C_TEXT};
+                selection-background-color: #2962ff;
+            }}
+            QPushButton {{
+                background: #2962ff; color: #ffffff; border: none;
+                padding: 6px 16px; border-radius: 4px;
+                font-size: 12px; font-weight: bold;
+            }}
+            QPushButton:hover {{ background: #1e53e5; }}
+            QListWidget {{
+                background-color: {self._C_GRID}; color: {self._C_TEXT};
+                border: 1px solid #2a2e39; border-radius: 4px;
+                font-size: 12px; font-family: "Consolas", "Microsoft YaHei";
+            }}
+            QListWidget::item {{ padding: 8px; }}
+            QListWidget::item:selected {{ background-color: #2962ff; }}
+        ''')
+
+        layout = QVBoxLayout()
+        layout.setSpacing(12)
+        layout.setContentsMargins(16, 16, 16, 16)
+
+        # 添加预警区域
+        add_layout = QHBoxLayout()
+
+        # 股票选择
+        self._code_input = QLineEdit()
+        self._code_input.setPlaceholderText('股票代码')
+        self._code_input.setFixedWidth(100)
+        add_layout.addWidget(self._code_input)
+
+        # 方向选择
+        self._dir_combo = QComboBox()
+        self._dir_combo.addItems(['高于', '低于'])
+        self._dir_combo.setFixedWidth(70)
+        add_layout.addWidget(self._dir_combo)
+
+        # 目标价格
+        self._price_input = QLineEdit()
+        self._price_input.setPlaceholderText('目标价格')
+        self._price_input.setFixedWidth(100)
+        self._price_input.setValidator(QDoubleValidator(0.0, 999999.0, 2))
+        add_layout.addWidget(self._price_input)
+
+        add_btn = QPushButton('添加')
+        add_btn.clicked.connect(self._add_alert)
+        add_layout.addWidget(add_btn)
+
+        layout.addLayout(add_layout)
+
+        # 预警列表
+        self._alert_list = QListWidget()
+        layout.addWidget(self._alert_list)
+
+        # 按钮
+        btn_layout = QHBoxLayout()
+        del_btn = QPushButton('删除选中')
+        del_btn.setStyleSheet('background: #ef5350;')
+        del_btn.clicked.connect(self._remove_alert)
+        btn_layout.addWidget(del_btn)
+        btn_layout.addStretch()
+
+        ok_btn = QPushButton('确定')
+        ok_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(ok_btn)
+
+        cancel_btn = QPushButton('取消')
+        cancel_btn.setStyleSheet('background: #4a4e59;')
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+
+        layout.addLayout(btn_layout)
+        self.setLayout(layout)
+
+    def _refresh_list(self):
+        self._alert_list.clear()
+        for a in self.alerts:
+            direction = '高于' if a['direction'] == 'above' else '低于'
+            status = ' [已触发]' if a.get('triggered') else ''
+            color_style = 'color: #787b86;' if a.get('triggered') else ''
+            text = f"{a['code']} {a.get('name', '')}  {direction} ¥{a['target']:.2f}{status}"
+            item = QListWidgetItem(text)
+            if a.get('triggered'):
+                item.setForeground(QColor('#787b86'))
+            self._alert_list.addItem(item)
+
+    def _add_alert(self):
+        code = self._code_input.text().strip()
+        price_text = self._price_input.text().strip()
+        if not code or not price_text:
+            return
+        try:
+            target = float(price_text)
+        except ValueError:
+            return
+
+        direction = 'above' if self._dir_combo.currentText() == '高于' else 'below'
+
+        # 获取股票名称
+        name = code
+        parent = self.parent()
+        if parent and hasattr(parent, 'get_stock_price'):
+            info = parent.get_stock_price(code)
+            if info:
+                name = info.name
+
+        self.alerts.append({
+            'code': code,
+            'name': name,
+            'target': target,
+            'direction': direction,
+            'triggered': False
+        })
+        self._refresh_list()
+        self._code_input.clear()
+        self._price_input.clear()
+
+    def _remove_alert(self):
+        row = self._alert_list.currentRow()
+        if 0 <= row < len(self.alerts):
+            self.alerts.pop(row)
+            self._refresh_list()
+
+    def get_alerts(self):
+        return self.alerts
+
+
+class BidAskDialog(QDialog):
+    """五档买卖盘对话框"""
+
+    _C_UP = '#ef5350'
+    _C_DOWN = '#26a69a'
+    _C_BG = '#131722'
+    _C_PANEL = '#161a25'
+    _C_GRID = '#1e222d'
+    _C_DIM = '#787b86'
+    _C_TEXT = '#d1d4dc'
+
+    def __init__(self, stock_code: str, stock_name: str, parent=None):
+        super().__init__(parent)
+        self.stock_code = stock_code
+        self.stock_name = stock_name
+        self.init_ui()
+        self._refresh()
+        # 30秒自动刷新
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._refresh)
+        self._timer.start(30000)
+
+    def init_ui(self):
+        self.setWindowTitle(f'{self.stock_code} - {self.stock_name} 五档盘口')
+        self.setFixedSize(320, 480)
+        self.setStyleSheet(f'''
+            QDialog {{ background-color: {self._C_PANEL}; }}
+            QLabel {{ color: {self._C_TEXT}; font-family: "Consolas", "Microsoft YaHei"; }}
+        ''')
+
+        layout = QVBoxLayout()
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        # 标题
+        self._title = QLabel(f'{self.stock_name}  {self.stock_code}')
+        self._title.setStyleSheet(f'font-size: 14px; font-weight: bold; color: {self._C_TEXT};')
+        layout.addWidget(self._title)
+
+        # 价格行
+        price_row = QHBoxLayout()
+        self._price_lbl = QLabel('--')
+        self._price_lbl.setStyleSheet('font-size: 18px; font-weight: bold;')
+        price_row.addWidget(self._price_lbl)
+        self._change_lbl = QLabel('--')
+        self._change_lbl.setStyleSheet('font-size: 13px; font-weight: bold;')
+        price_row.addWidget(self._change_lbl)
+        price_row.addStretch()
+        layout.addLayout(price_row)
+
+        # 分隔线
+        sep = QLabel('')
+        sep.setFixedHeight(1)
+        sep.setStyleSheet(f'background-color: {self._C_GRID};')
+        layout.addWidget(sep)
+
+        # 卖盘 (卖五到卖一，从上到下)
+        self._ask_labels = []
+        for i in range(4, -1, -1):
+            row = QHBoxLayout()
+            tag = QLabel(f'卖{["一","二","三","四","五"][i]}')
+            tag.setFixedWidth(30)
+            tag.setStyleSheet(f'font-size: 12px; color: {self._C_DOWN};')
+            row.addWidget(tag)
+
+            price = QLabel('--')
+            price.setFixedWidth(80)
+            price.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            price.setStyleSheet(f'font-size: 13px; font-weight: bold; color: {self._C_DOWN};')
+            row.addWidget(price)
+
+            vol = QLabel('--')
+            vol.setFixedWidth(80)
+            vol.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            vol.setStyleSheet(f'font-size: 12px; color: {self._C_DIM};')
+            row.addWidget(vol)
+            row.addStretch()
+            layout.addLayout(row)
+            self._ask_labels.append((price, vol, i))
+
+        # 分隔线
+        sep2 = QLabel('')
+        sep2.setFixedHeight(1)
+        sep2.setStyleSheet(f'background-color: {self._C_GRID};')
+        layout.addWidget(sep2)
+
+        # 买盘 (买一到买五，从上到下)
+        self._bid_labels = []
+        for i in range(5):
+            row = QHBoxLayout()
+            tag = QLabel(f'买{["一","二","三","四","五"][i]}')
+            tag.setFixedWidth(30)
+            tag.setStyleSheet(f'font-size: 12px; color: {self._C_UP};')
+            row.addWidget(tag)
+
+            price = QLabel('--')
+            price.setFixedWidth(80)
+            price.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            price.setStyleSheet(f'font-size: 13px; font-weight: bold; color: {self._C_UP};')
+            row.addWidget(price)
+
+            vol = QLabel('--')
+            vol.setFixedWidth(80)
+            vol.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            vol.setStyleSheet(f'font-size: 12px; color: {self._C_DIM};')
+            row.addWidget(vol)
+            row.addStretch()
+            layout.addLayout(row)
+            self._bid_labels.append((price, vol, i))
+
+        # 分隔线
+        sep3 = QLabel('')
+        sep3.setFixedHeight(1)
+        sep3.setStyleSheet(f'background-color: {self._C_GRID};')
+        layout.addWidget(sep3)
+
+        # 额外信息
+        self._extra_lbl = QLabel('')
+        self._extra_lbl.setStyleSheet(f'font-size: 11px; color: {self._C_DIM};')
+        layout.addWidget(self._extra_lbl)
+
+        layout.addStretch()
+
+        # 关闭按钮
+        close_btn = QPushButton('关闭')
+        close_btn.setFixedHeight(30)
+        close_btn.setStyleSheet(f'''
+            QPushButton {{
+                background-color: {self._C_GRID}; color: {self._C_TEXT};
+                border: none; border-radius: 4px; font-size: 13px;
+            }}
+            QPushButton:hover {{ background-color: #2962ff; }}
+        ''')
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn)
+
+        self.setLayout(layout)
+
+    def _refresh(self):
+        parent = self.parent()
+        if not parent or not hasattr(parent, 'get_stock_price'):
+            return
+        info = parent.get_stock_price(self.stock_code)
+        if not info:
+            return
+
+        c = info.price
+        prev = info.open_price  # 近似
+        chg = info.change
+        pct = info.change_percent
+        up = chg >= 0
+        col = self._C_UP if up else self._C_DOWN
+        s = '+' if up else ''
+
+        self._price_lbl.setText(f'{c:.2f}')
+        self._price_lbl.setStyleSheet(f'font-size: 18px; font-weight: bold; color: {col};')
+        self._change_lbl.setText(f'{s}{chg:.2f}  {s}{pct:.2f}%')
+        self._change_lbl.setStyleSheet(f'font-size: 13px; font-weight: bold; color: {col};')
+
+        # 卖盘 (从卖五到卖一)
+        for price_lbl, vol_lbl, i in self._ask_labels:
+            p = info.ask_prices[i]
+            v = info.ask_vols[i]
+            if p > 0:
+                price_lbl.setText(f'{p:.2f}')
+                vol_lbl.setText(f'{v}手')
+            else:
+                price_lbl.setText('--')
+                vol_lbl.setText('--')
+
+        # 买盘
+        for price_lbl, vol_lbl, i in self._bid_labels:
+            p = info.bid_prices[i]
+            v = info.bid_vols[i]
+            if p > 0:
+                price_lbl.setText(f'{p:.2f}')
+                vol_lbl.setText(f'{v}手')
+            else:
+                price_lbl.setText('--')
+                vol_lbl.setText('--')
+
+        # 额外信息
+        total_bid = sum(info.bid_vols)
+        total_ask = sum(info.ask_vols)
+        ratio = total_bid / total_ask if total_ask > 0 else 0
+        self._extra_lbl.setText(
+            f'买量: {total_bid}手  卖量: {total_ask}手  比率: {ratio:.2f}')
+
+    def closeEvent(self, event):
+        self._timer.stop()
+        super().closeEvent(event)
 
 
 class TCalculatorDialog(QDialog):
@@ -658,14 +1164,6 @@ class TCalculatorDialog(QDialog):
 class StockDetailDialog(QDialog):
     """股票详情对话框 - 展示分时走势图和成交量"""
 
-    CHART_INTRADAY = '分时'
-    CHART_DAILY = '日K'
-    CHART_WEEKLY = '周K'
-    CHART_MONTHLY = '月K'
-    CHART_MACD = 'MACD'
-    CHART_KDJ = 'KDJ'
-    CHART_RSI = 'RSI'
-
     # 数据缓存
     _cache = {}
     _cache_timeout = 300  # 缓存5分钟
@@ -674,120 +1172,150 @@ class StockDetailDialog(QDialog):
         super().__init__(parent)
         self.stock_code = stock_code
         self.stock_name = stock_name
-        self.chart_type = self.CHART_INTRADAY
-        self.time_data = []  # 时间数据
-        self.price_data = []  # 价格数据
-        self.volume_data = []  # 成交量数据
-        self.avg_price_data = []  # 均价数据
-        # K线数据
-        self.kline_dates = []
-        self.kline_open = []
-        self.kline_high = []
-        self.kline_low = []
-        self.kline_close = []
-        self.kline_volume = []
+        self.time_data = []
+        self.price_data = []
+        self.volume_data = []
+        self.avg_price_data = []
         
         # 悬停显示
-        self.hover_annotation = None
-        self.hover_line = None
-        
+        self.hover_vline = None
+        self.hover_hline = None
+        self.hover_price_label = None
+        self.hover_date_label = None
+        self.hover_info_texts = []
+
         self.init_ui()
         self.load_intraday_data()
 
     def init_ui(self):
-        """初始化界面"""
+        """初始化界面 - 仿同花顺/东方财富风格"""
         self.setWindowTitle(f'{self.stock_code} - {self.stock_name}')
-        self.setFixedSize(960, 780)
+        self.setFixedSize(1000, 800)
         self.setStyleSheet('''
             QDialog {
-                background-color: #1e222d;
+                background-color: #161a25;
             }
             QLabel {
                 color: #d1d4dc;
-                font-size: 14px;
+                font-size: 12px;
+                font-family: "Microsoft YaHei", "SimHei", sans-serif;
             }
             QPushButton {
-                background-color: #2a2e39;
-                color: #d1d4dc;
-                border: 1px solid #363a45;
-                padding: 6px 14px;
-                border-radius: 3px;
+                background-color: transparent;
+                color: #787b86;
+                border: none;
+                padding: 5px 12px;
+                border-radius: 2px;
                 font-size: 12px;
                 font-weight: bold;
+                font-family: "Microsoft YaHei", "SimHei", sans-serif;
             }
             QPushButton:hover {
-                background-color: #363a45;
+                background-color: #2a2e39;
+                color: #d1d4dc;
             }
             QPushButton:checked {
                 background-color: #2962ff;
                 color: #ffffff;
-                border-color: #2962ff;
             }
         ''')
 
         layout = QVBoxLayout()
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(8)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(0)
 
-        # 标题
-        title_label = QLabel(f'{self.stock_code} - {self.stock_name}')
-        title_label.setStyleSheet('font-size: 16px; font-weight: bold; color: #d1d4dc;')
-        layout.addWidget(title_label)
+        # === 顶部标题栏 ===
+        header_layout = QHBoxLayout()
+        header_layout.setSpacing(12)
+
+        self.title_label = QLabel(f'{self.stock_name}')
+        self.title_label.setStyleSheet('font-size: 15px; font-weight: bold; color: #d1d4dc;')
+        header_layout.addWidget(self.title_label)
+
+        self.price_label = QLabel('')
+        self.price_label.setStyleSheet('font-size: 15px; font-weight: bold;')
+        header_layout.addWidget(self.price_label)
+
+        self.change_label = QLabel('')
+        self.change_label.setStyleSheet('font-size: 13px; font-weight: bold;')
+        header_layout.addWidget(self.change_label)
+
+        header_layout.addStretch()
 
         # 图表类型切换按钮
-        chart_type_layout = QHBoxLayout()
-        chart_type_layout.setSpacing(4)
-        self.chart_btn_group = []
-        for chart_type in [self.CHART_INTRADAY, self.CHART_DAILY, self.CHART_WEEKLY, self.CHART_MONTHLY, self.CHART_MACD, self.CHART_KDJ, self.CHART_RSI]:
-            btn = QPushButton(chart_type)
-            btn.setCheckable(True)
-            btn.clicked.connect(lambda checked, ct=chart_type: self.switch_chart_type(ct))
-            self.chart_btn_group.append(btn)
-            chart_type_layout.addWidget(btn)
+        self._chart_btns = []
+        btn_fs = QPushButton('分时')
+        btn_fs.setCheckable(True)
+        btn_fs.setChecked(True)
+        btn_fs.clicked.connect(lambda: self._switch_chart('分时'))
+        header_layout.addWidget(btn_fs)
+        self._chart_btns.append(btn_fs)
 
-        # 默认选中分时图
-        self.chart_btn_group[0].setChecked(True)
+        btn_kline = QPushButton('K线')
+        btn_kline.setCheckable(True)
+        btn_kline.clicked.connect(lambda: self._switch_chart('K线'))
+        header_layout.addWidget(btn_kline)
+        self._chart_btns.append(btn_kline)
 
-        chart_type_layout.addStretch()
-        layout.addLayout(chart_type_layout)
+        layout.addLayout(header_layout)
 
-        # 创建matplotlib图表 - 深色背景
-        self.figure = Figure(figsize=(9.6, 7), dpi=100, facecolor='#131722')
+        # === 信息栏（显示悬停时的OHLC数据） ===
+        self.info_label = QLabel('')
+        self.info_label.setStyleSheet('font-size: 11px; color: #787b86; padding: 2px 4px;')
+        self.info_label.setFixedHeight(20)
+        layout.addWidget(self.info_label)
+
+        # === 图表区域 ===
+        self.figure = Figure(figsize=(10, 7.2), dpi=100, facecolor='#131722')
         self.canvas = FigureCanvas(self.figure)
 
-        # 创建两个子图：价格走势和成交量
-        self.ax_price = self.figure.add_subplot(211)
-        self.ax_volume = self.figure.add_subplot(212, sharex=self.ax_price)
+        # 使用GridSpec实现价格区75% + 成交量区25%
+        from matplotlib.gridspec import GridSpec
+        self.gs = GridSpec(2, 1, height_ratios=[3, 1], figure=self.figure, hspace=0)
+        self.ax_price = self.figure.add_subplot(self.gs[0])
+        self.ax_volume = self.figure.add_subplot(self.gs[1], sharex=self.ax_price)
 
-        self.figure.subplots_adjust(hspace=0.05, left=0.06, right=0.94, top=0.95, bottom=0.06)
+        self.figure.subplots_adjust(left=0.05, right=0.95, top=0.98, bottom=0.04)
 
-        # 设置坐标轴深色风格
+        # 深色坐标轴
         for ax in [self.ax_price, self.ax_volume]:
             ax.set_facecolor('#131722')
-            ax.tick_params(labelsize=9, colors='#787b86')
+            ax.tick_params(labelsize=9, colors='#787b86', direction='in', length=3)
             for spine in ax.spines.values():
-                spine.set_color('#2a2e39')
+                spine.set_color('#1e222d')
+            ax.yaxis.set_label_position('right')
+            ax.yaxis.tick_right()
 
-        # 添加鼠标悬停显示数据的功能
+        # 隐藏价格图x轴标签
+        plt.setp(self.ax_price.get_xticklabels(), visible=False)
+
         self.canvas.mpl_connect('motion_notify_event', self.on_hover)
 
-        # 导航工具栏
-        self.toolbar = NavigationToolbar(self.canvas, self)
-        self.toolbar.setStyleSheet('background-color: #1e222d; border: none;')
-        layout.addWidget(self.toolbar)
-
         layout.addWidget(self.canvas)
-
-        # 关闭按钮
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-
-        self.close_btn = QPushButton('关闭')
-        self.close_btn.clicked.connect(self.accept)
-        btn_layout.addWidget(self.close_btn)
-
-        layout.addLayout(btn_layout)
         self.setLayout(layout)
+
+        # 更新标题价格信息
+        self._update_header_price()
+
+    def _update_header_price(self):
+        """更新标题栏价格信息"""
+        try:
+            real_data = self.get_today_real_data()
+            if real_data:
+                price = real_data['close']
+                prev_close = real_data['prev_close']
+                change = price - prev_close
+                change_pct = change / prev_close * 100 if prev_close > 0 else 0
+                is_up = change >= 0
+                color = '#ef5350' if is_up else '#26a69a'
+                sign = '+' if is_up else ''
+
+                self.price_label.setText(f'{price:.2f}')
+                self.price_label.setStyleSheet(f'font-size: 15px; font-weight: bold; color: {color};')
+                self.change_label.setText(f'{sign}{change:.2f}  {sign}{change_pct:.2f}%')
+                self.change_label.setStyleSheet(f'font-size: 13px; font-weight: bold; color: {color};')
+        except Exception:
+            pass
 
     @classmethod
     def _get_cache_key(cls, data_type: str, stock_code: str) -> str:
@@ -807,6 +1335,18 @@ class StockDetailDialog(QDialog):
     def _save_to_cache(cls, cache_key: str, data):
         """保存数据到缓存"""
         cls._cache[cache_key] = (data, datetime.datetime.now().timestamp())
+
+    def _open_kline(self):
+        """打开K线图"""
+        dialog = KLineDialog(self.stock_code, self.stock_name, self)
+        dialog.show()
+
+    def _switch_chart(self, chart_type):
+        """切换分时/K线"""
+        for btn in self._chart_btns:
+            btn.setChecked(btn.text() == chart_type)
+        if chart_type == 'K线':
+            self._open_kline()
 
     def load_intraday_data(self):
         """加载分时数据"""
@@ -1134,742 +1674,98 @@ class StockDetailDialog(QDialog):
             current_price = self.price_data[-1]
             open_price = self.avg_price_data[0] if self.avg_price_data else prev_close
             self.plot_charts(current_price, prev_close, open_price)
-    
-    def switch_chart_type(self, chart_type: str):
-        """切换图表类型"""
-        if self.chart_type == chart_type:
-            return
-        
-        self.chart_type = chart_type
-        
-        # 更新按钮状态
-        for i, btn in enumerate(self.chart_btn_group):
-            chart_name = [self.CHART_INTRADAY, self.CHART_DAILY, self.CHART_WEEKLY, self.CHART_MONTHLY, self.CHART_MACD, self.CHART_KDJ, self.CHART_RSI][i]
-            btn.setChecked(chart_name == chart_type)
-        
-        # 根据类型加载不同数据
-        if chart_type == self.CHART_INTRADAY:
-            self.load_intraday_data()
-        elif chart_type in [self.CHART_MACD, self.CHART_KDJ, self.CHART_RSI]:
-            self.load_kline_data(self.CHART_DAILY)
-        else:
-            self.load_kline_data(chart_type)
-    
-    def load_kline_data(self, chart_type: str):
-        """加载K线数据"""
-        cache_key = self._get_cache_key(f'kline_{chart_type}', self.stock_code)
-        cached_data = self._get_from_cache(cache_key)
 
-        if cached_data:
-            self.kline_dates = cached_data['kline_dates']
-            self.kline_open = cached_data['kline_open']
-            self.kline_high = cached_data['kline_high']
-            self.kline_low = cached_data['kline_low']
-            self.kline_close = cached_data['kline_close']
-            self.kline_volume = cached_data['kline_volume']
+    # ========== 深色主题公共样式 ==========
 
-            if self.kline_dates:
-                self._draw_current_chart()
-                return
+    _UP_COLOR = '#ef5350'
+    _DOWN_COLOR = '#26a69a'
+    _BG = '#131722'
+    _GRID = '#1e222d'
+    _TEXT_DIM = '#787b86'
+    _TEXT = '#d1d4dc'
 
-        # 优先从腾讯API获取真实K线数据
-        if self.fetch_real_kline_data(chart_type):
-            self._draw_current_chart()
-            return
-
-        # 真实API失败，尝试用今日实时数据生成
-        today_data = self.get_today_real_data()
-        if today_data:
-            self.generate_realistic_kline_data(today_data, chart_type)
-        else:
-            print(f"无法获取真实数据，使用模拟K线数据")
-            self.generate_mock_kline_data()
-
-        self._draw_current_chart()
-
-    def _draw_current_chart(self):
-        """根据当前图表类型绘制"""
-        if self.chart_type == self.CHART_MACD:
-            self.plot_macd()
-        elif self.chart_type == self.CHART_KDJ:
-            self.plot_kdj()
-        elif self.chart_type == self.CHART_RSI:
-            self.plot_rsi()
-        else:
-            self.plot_kline()
-
-    def fetch_real_kline_data(self, chart_type):
-        """从腾讯API获取真实K线历史数据"""
-        try:
-            if self.stock_code.startswith('sh') or self.stock_code.startswith('sz'):
-                code_with_prefix = self.stock_code
-            else:
-                code_prefix = "sh" if self.stock_code.startswith(("6", "5")) else "sz"
-                code_with_prefix = f"{code_prefix}{self.stock_code}"
-
-            period_map = {
-                self.CHART_DAILY: 'day',
-                self.CHART_WEEKLY: 'week',
-                self.CHART_MONTHLY: 'month'
-            }
-            period = period_map.get(chart_type, 'day')
-
-            # 腾讯K线API（前复权）
-            api_url = f"http://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param={code_with_prefix},{period},,,250,qfq"
-            response = requests.get(api_url, timeout=10, proxies={'http': None, 'https': None})
-
-            if response.status_code == 200:
-                data = response.json()
-                if data.get('code') == 0 and 'data' in data:
-                    stock_data = data['data'].get(code_with_prefix, {})
-                    # 数据key：qfqday / qfqweek / qfqmonth
-                    key = f'qfq{period}'
-                    kline_list = stock_data.get(key, [])
-                    if not kline_list:
-                        kline_list = stock_data.get(period, [])
-
-                    if kline_list:
-                        self.kline_dates = []
-                        self.kline_open = []
-                        self.kline_high = []
-                        self.kline_low = []
-                        self.kline_close = []
-                        self.kline_volume = []
-
-                        for item in kline_list:
-                            if len(item) >= 6:
-                                self.kline_dates.append(item[0])
-                                self.kline_open.append(float(item[1]))
-                                self.kline_high.append(float(item[2]))
-                                self.kline_low.append(float(item[3]))
-                                self.kline_close.append(float(item[4]))
-                                self.kline_volume.append(int(float(item[5])))
-
-                        if len(self.kline_dates) > 0:
-                            print(f"获取到 {len(self.kline_dates)} 条{period}K线真实数据")
-                            # 缓存
-                            cache_key = self._get_cache_key(f'kline_{chart_type}', self.stock_code)
-                            self._save_to_cache(cache_key, {
-                                'kline_dates': self.kline_dates,
-                                'kline_open': self.kline_open,
-                                'kline_high': self.kline_high,
-                                'kline_low': self.kline_low,
-                                'kline_close': self.kline_close,
-                                'kline_volume': self.kline_volume
-                            })
-                            return True
-        except Exception as e:
-            print(f"获取K线数据失败: {e}")
-        return False
-
-    def generate_realistic_kline_data(self, today_data, chart_type):
-        """基于今日真实数据生成K线数据"""
-        from datetime import datetime, timedelta
-
-        # 计算历史数据天数
-        days_map = {self.CHART_DAILY: 60, self.CHART_WEEKLY: 52, self.CHART_MONTHLY: 24}
-        num_days = days_map.get(chart_type, 60)
-
-        base_price = today_data['prev_close']
-
-        # 生成历史数据
-        self.kline_dates = []
-        self.kline_open = []
-        self.kline_high = []
-        self.kline_low = []
-        self.kline_close = []
-        self.kline_volume = []
-
-        today = datetime.now()
-
-        for i in range(num_days - 1, 0, -1):
-            date = today - timedelta(days=i)
-            date_str = date.strftime('%Y-%m-%d')
-
-            # 模拟价格波动
-            import random
-            random.seed(i)  # 保持一致性
-
-            change_pct = random.uniform(-0.05, 0.05)  # -5% 到 +5% 的波动
-
-            open_price = base_price * (1 + random.uniform(-0.02, 0.02))
-            close_price = open_price * (1 + change_pct)
-            high_price = max(open_price, close_price) * (1 + random.uniform(0, 0.02))
-            low_price = min(open_price, close_price) * (1 - random.uniform(0, 0.02))
-            volume = int(random.uniform(50, 200) * 10000)
-
-            self.kline_dates.append(date_str)
-            self.kline_open.append(round(open_price, 2))
-            self.kline_high.append(round(high_price, 2))
-            self.kline_low.append(round(low_price, 2))
-            self.kline_close.append(round(close_price, 2))
-            self.kline_volume.append(volume)
-
-        # 添加今日真实数据
-        today_str = today.strftime('%Y-%m-%d')
-        self.kline_dates.append(today_str)
-        self.kline_open.append(today_data['open'])
-        self.kline_high.append(today_data['high'])
-        self.kline_low.append(today_data['low'])
-        self.kline_close.append(today_data['close'])
-        self.kline_volume.append(today_data['volume'])
-
-        print(f"生成K线数据: {len(self.kline_dates)} 条，今日数据: 开{today_data['open']} 高{today_data['high']} 低{today_data['low']} 收{today_data['close']}")
-
-        # 缓存数据
-        cache_key = self._get_cache_key(f'kline_{chart_type}', self.stock_code)
-        cache_data = {
-            'kline_dates': self.kline_dates,
-            'kline_open': self.kline_open,
-            'kline_high': self.kline_high,
-            'kline_low': self.kline_low,
-            'kline_close': self.kline_close,
-            'kline_volume': self.kline_volume
-        }
-        self._save_to_cache(cache_key, cache_data)
-    
-    def parse_kline_data(self, data: list):
-        """解析K线数据"""
-        self.kline_dates = []
-        self.kline_open = []
-        self.kline_high = []
-        self.kline_low = []
-        self.kline_close = []
-        self.kline_volume = []
-        
-        for item in data:
-            try:
-                date_str = item.get('day', '')
-                open_price = float(item.get('open', 0))
-                high_price = float(item.get('high', 0))
-                low_price = float(item.get('low', 0))
-                close_price = float(item.get('close', 0))
-                volume = int(item.get('volume', 0))
-                
-                if open_price > 0:
-                    self.kline_dates.append(date_str)
-                    self.kline_open.append(open_price)
-                    self.kline_high.append(high_price)
-                    self.kline_low.append(low_price)
-                    self.kline_close.append(close_price)
-                    self.kline_volume.append(volume)
-            except (ValueError, KeyError) as e:
-                continue
-    
-    def generate_mock_kline_data(self):
-        """生成模拟K线数据"""
-        base_price = 100.0
-        base_date = datetime.datetime.now() - datetime.timedelta(days=100)
-        
-        for i in range(100):
-            date_str = (base_date + datetime.timedelta(days=i)).strftime('%Y-%m-%d')
-            # 模拟价格波动
-            open_price = base_price + (i % 10 - 5) * 0.5
-            close_price = open_price + (i % 7 - 3) * 0.3
-            high_price = max(open_price, close_price) + abs(i % 5) * 0.2
-            low_price = min(open_price, close_price) - abs(i % 5) * 0.2
-            volume = 100000 + i * 1000 + (i % 20) * 5000
-            
-            self.kline_dates.append(date_str)
-            self.kline_open.append(open_price)
-            self.kline_high.append(high_price)
-            self.kline_low.append(low_price)
-            self.kline_close.append(close_price)
-            self.kline_volume.append(volume)
-    
-    def calculate_ma(self, data: list, period: int) -> list:
-        """计算移动平均线"""
-        if len(data) < period:
-            return [np.nan] * len(data)
-        
-        ma_values = []
-        for i in range(len(data)):
-            if i < period - 1:
-                ma_values.append(np.nan)
-            else:
-                ma_values.append(np.mean(data[i - period + 1:i + 1]))
-        
-        return ma_values
-    
-    def calculate_ema(self, data: list, period: int) -> list:
-        """计算指数移动平均线"""
-        if not data:
-            return []
-        
-        ema_values = [data[0]]
-        multiplier = 2 / (period + 1)
-        
-        for i in range(1, len(data)):
-            ema = (data[i] * multiplier) + (ema_values[-1] * (1 - multiplier))
-            ema_values.append(ema)
-        
-        return ema_values
-    
-    def calculate_macd(self, data: list, short_period: int = 12, long_period: int = 26, signal_period: int = 9):
-        """计算MACD指标"""
-        if len(data) < long_period:
-            return [], [], []
-        
-        ema_short = self.calculate_ema(data, short_period)
-        ema_long = self.calculate_ema(data, long_period)
-        
-        dif = [es - el for es, el in zip(ema_short, ema_long)]
-        
-        ema_signal = self.calculate_ema(dif, signal_period)
-        
-        macd = [d - s for d, s in zip(dif, ema_signal)]
-        
-        return dif, ema_signal, macd
-    
-    def calculate_kdj(self, high_list: list, low_list: list, close_list: list, n: int = 9, m1: int = 3, m2: int = 3):
-        """计算KDJ指标"""
-        if len(close_list) < n:
-            return [], [], []
-        
-        rsv_values = []
-        k_values = []
-        d_values = []
-        j_values = []
-        
-        for i in range(len(close_list)):
-            if i < n - 1:
-                rsv = 50
-            else:
-                high_n = max(high_list[i - n + 1:i + 1])
-                low_n = min(low_list[i - n + 1:i + 1])
-                if high_n == low_n:
-                    rsv = 50
-                else:
-                    rsv = (close_list[i] - low_n) / (high_n - low_n) * 100
-            
-            rsv_values.append(rsv)
-            
-            if i == 0:
-                k = 50
-                d = 50
-            else:
-                k = (rsv + (m1 - 1) * k_values[-1]) / m1
-                d = (k + (m2 - 1) * d_values[-1]) / m2
-            
-            j = 3 * k - 2 * d
-            
-            k_values.append(k)
-            d_values.append(d)
-            j_values.append(j)
-        
-        return k_values, d_values, j_values
-    
-    def calculate_rsi(self, close_list: list, period: int = 6):
-        """计算RSI指标"""
-        if len(close_list) < period + 1:
-            return []
-        
-        rsi_values = []
-        gains = []
-        losses = []
-        
-        for i in range(1, len(close_list)):
-            change = close_list[i] - close_list[i - 1]
-            if change > 0:
-                gains.append(change)
-                losses.append(0)
-            else:
-                gains.append(0)
-                losses.append(abs(change))
-        
-        if len(gains) < period:
-            return []
-        
-        avg_gain = sum(gains[:period]) / period
-        avg_loss = sum(losses[:period]) / period
-        
-        rsi_values.append(50)
-        
-        for i in range(period, len(gains)):
-            avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-            avg_loss = (avg_loss * (period - 1) + losses[i]) / period
-            
-            if avg_loss == 0:
-                rsi = 100
-            else:
-                rs = avg_gain / avg_loss
-                rsi = 100 - (100 / (1 + rs))
-            
-            rsi_values.append(rsi)
-        
-        return rsi_values
-    
-    def on_hover(self, event):
-        """处理鼠标悬停事件，显示数据详情"""
-        if event.inaxes != self.ax_price:
-            return
-        
-        if self.hover_annotation is not None:
-            self.hover_annotation.remove()
-            self.hover_annotation = None
-        if self.hover_line is not None:
-            self.hover_line.remove()
-            self.hover_line = None
-        
-        x_data = event.xdata
-        if x_data is None:
-            return
-        
-        idx = int(round(x_data))
-        
-        if idx < 0 or idx >= len(self.kline_dates):
-            return
-        
-        date_str = self.kline_dates[idx]
-        
-        if self.chart_type in [self.CHART_MACD, self.CHART_KDJ, self.CHART_RSI]:
-            dif, dea, macd = self.calculate_macd(self.kline_close)
-            k_values, d_values, j_values = self.calculate_kdj(self.kline_high, self.kline_low, self.kline_close)
-            rsi_values = self.calculate_rsi(self.kline_close)
-            
-            if self.chart_type == self.CHART_MACD:
-                if idx < len(dif):
-                    text = f'日期: {date_str}\nDIF: {dif[idx]:.4f}\nDEA: {dea[idx]:.4f}\nMACD: {macd[idx]:.4f}'
-                    y_data = dif[idx]
-                else:
-                    return
-            elif self.chart_type == self.CHART_KDJ:
-                if idx < len(k_values):
-                    text = f'日期: {date_str}\nK: {k_values[idx]:.2f}\nD: {d_values[idx]:.2f}\nJ: {j_values[idx]:.2f}'
-                    y_data = k_values[idx]
-                else:
-                    return
-            elif self.chart_type == self.CHART_RSI:
-                if idx < len(rsi_values):
-                    text = f'日期: {date_str}\nRSI(6): {rsi_values[idx]:.2f}'
-                    y_data = rsi_values[idx]
-                else:
-                    return
-        else:
-            if idx >= len(self.kline_open):
-                return
-            
-            open_price = self.kline_open[idx]
-            high_price = self.kline_high[idx]
-            low_price = self.kline_low[idx]
-            close_price = self.kline_close[idx]
-            volume = self.kline_volume[idx]
-            
-            text = (f'日期: {date_str}\n'
-                   f'开: {open_price:.2f}\n'
-                   f'高: {high_price:.2f}\n'
-                   f'低: {low_price:.2f}\n'
-                   f'收: {close_price:.2f}\n'
-                   f'量: {volume/10000:.1f}万')
-            y_data = close_price
-        
-        self.hover_line = self.ax_price.axvline(x=idx, color='red', linestyle='--', alpha=0.5, linewidth=1)
-        
-        bbox_props = dict(boxstyle='round,pad=0.5', facecolor='yellow', alpha=0.8, edgecolor='gray')
-        self.hover_annotation = self.ax_price.annotate(text, xy=(idx, y_data), xytext=(10, 10),
-                                                       textcoords='offset points', bbox=bbox_props,
-                                                       fontsize=9, verticalalignment='top')
-        
-        self.canvas.draw_idle()
-    
-    def plot_kline(self):
-        """绘制专业K线图（深色主题）"""
-        try:
-            self.ax_price.clear()
-            self.ax_volume.clear()
-
-            if not self.kline_dates:
-                self.ax_price.text(0.5, 0.5, '暂无数据',
-                                  ha='center', va='center', fontsize=14, color='#787b86',
-                                  transform=self.ax_price.transAxes)
-                self.canvas.draw()
-                return
-
-            # 深色背景
-            self.ax_price.set_facecolor('#131722')
-            self.ax_volume.set_facecolor('#131722')
-
-            # 计算MA指标
-            ma5 = self.calculate_ma(self.kline_close, 5)
-            ma10 = self.calculate_ma(self.kline_close, 10)
-            ma20 = self.calculate_ma(self.kline_close, 20)
-            ma60 = self.calculate_ma(self.kline_close, 60)
-
-            # 绘制K线蜡烛图
-            for i, (date, open_p, high_p, low_p, close_p) in enumerate(zip(
-                self.kline_dates, self.kline_open, self.kline_high,
-                self.kline_low, self.kline_close)):
-
-                is_up = close_p >= open_p
-                color = '#ef5350' if is_up else '#26a69a'
-
-                # 影线
-                self.ax_price.plot([i, i], [low_p, high_p], color=color, linewidth=0.8, solid_capstyle='round')
-
-                # 实体
-                body_height = abs(close_p - open_p) if abs(close_p - open_p) > 0.001 else open_p * 0.002
-                body_bottom = min(open_p, close_p)
-                self.ax_price.bar([i], [body_height], bottom=[body_bottom],
-                                 width=0.65, color=color, edgecolor=color, linewidth=0.3)
-
-            # MA线 - TradingView风格配色
-            x_range = range(len(self.kline_dates))
-            self.ax_price.plot(x_range, ma5, color='#f5c842', linewidth=1.0, label='MA5', alpha=0.9)
-            self.ax_price.plot(x_range, ma10, color='#4da6ff', linewidth=1.0, label='MA10', alpha=0.9)
-            self.ax_price.plot(x_range, ma20, color='#ff6f91', linewidth=1.0, label='MA20', alpha=0.9)
-            self.ax_price.plot(x_range, ma60, color='#9c27b0', linewidth=1.0, label='MA60', alpha=0.9)
-
-            # 价格轴右侧
-            self.ax_price.yaxis.set_label_position('right')
-            self.ax_price.yaxis.tick_right()
-
-            # 网格
-            self.ax_price.grid(True, alpha=0.15, linestyle='-', linewidth=0.5, color='#2a2e39')
-            self.ax_price.set_axisbelow(True)
-
-            # 格式化价格
-            self.ax_price.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.2f}'))
-            for label in self.ax_price.get_yticklabels():
-                label.set_fontsize(9)
-                label.set_color('#787b86')
-
-            # 隐藏上边框和显示右边框
-            self.ax_price.spines['top'].set_visible(False)
-            self.ax_price.spines['left'].set_visible(False)
-            self.ax_price.spines['right'].set_color('#2a2e39')
-            self.ax_price.spines['bottom'].set_color('#2a2e39')
-
-            # 图例
-            legend = self.ax_price.legend(loc='upper left', fontsize=8, ncol=4,
-                                framealpha=0.6, edgecolor='#2a2e39', facecolor='#1e222d',
-                                labelcolor='#d1d4dc')
-
-            # 设置x轴刻度
-            step = max(1, len(self.kline_dates) // 8)
-            self.ax_price.set_xticks(range(0, len(self.kline_dates), step))
-            self.ax_price.set_xticklabels([])
-
-            # 设置y轴范围留白
-            price_min = min(self.kline_low)
-            price_max = max(self.kline_high)
-            padding = (price_max - price_min) * 0.05
-            self.ax_price.set_ylim(price_min - padding, price_max + padding)
-
-            # 绘制成交量
-            vol_max = max(self.kline_volume) if self.kline_volume else 1
-            for i, (date, open_p, close_p, volume) in enumerate(zip(
-                self.kline_dates, self.kline_open, self.kline_close, self.kline_volume)):
-                is_up = close_p >= open_p
-                color = '#ef5350' if is_up else '#26a69a'
-                self.ax_volume.bar([i], [volume], width=0.65, color=color, alpha=0.6, edgecolor='none')
-
-            # MA成交量线
-            vol_ma5 = self.calculate_ma(self.kline_volume, 5)
-            vol_ma10 = self.calculate_ma(self.kline_volume, 10)
-            self.ax_volume.plot(x_range, vol_ma5, color='#f5c842', linewidth=0.8, alpha=0.7)
-            self.ax_volume.plot(x_range, vol_ma10, color='#4da6ff', linewidth=0.8, alpha=0.7)
-
-            # 成交量样式
-            self.ax_volume.grid(True, alpha=0.15, axis='y', linestyle='-', linewidth=0.5, color='#2a2e39')
-            self.ax_volume.set_axisbelow(True)
-
-            def volume_formatter(x, p):
-                if x >= 100000000:
-                    return f'{x/100000000:.1f}亿'
-                elif x >= 10000:
-                    return f'{x/10000:.0f}万'
-                return f'{int(x)}'
-
-            self.ax_volume.yaxis.set_major_formatter(plt.FuncFormatter(volume_formatter))
-            self.ax_volume.yaxis.set_label_position('right')
-            self.ax_volume.yaxis.tick_right()
-
-            # x轴日期
-            self.ax_volume.set_xticks(range(0, len(self.kline_dates), step))
-            self.ax_volume.set_xticklabels([self.kline_dates[i][5:] for i in range(0, len(self.kline_dates), step)],
-                                          rotation=0, fontsize=8, color='#787b86')
-
-            for label in self.ax_volume.get_yticklabels():
-                label.set_fontsize(8)
-                label.set_color('#787b86')
-
-            self.ax_volume.spines['top'].set_visible(False)
-            self.ax_volume.spines['left'].set_visible(False)
-            self.ax_volume.spines['right'].set_color('#2a2e39')
-            self.ax_volume.spines['bottom'].set_color('#2a2e39')
-
-            self.figure.tight_layout()
-            self.canvas.draw()
-        except Exception as e:
-            print(f"K线图绘制错误: {e}")
-            import traceback
-            traceback.print_exc()
-    
-    def _style_dark_axis(self, ax):
-        """给坐标轴应用深色主题"""
-        ax.set_facecolor('#131722')
-        ax.tick_params(labelsize=9, colors='#787b86')
-        ax.grid(True, alpha=0.15, linestyle='-', linewidth=0.5, color='#2a2e39')
-        ax.set_axisbelow(True)
-        ax.spines['top'].set_visible(False)
-        ax.spines['left'].set_visible(False)
-        ax.spines['right'].set_color('#2a2e39')
-        ax.spines['bottom'].set_color('#2a2e39')
+    def _setup_axis(self, ax, show_xlabels=True):
+        """统一设置深色坐标轴"""
+        ax.set_facecolor(self._BG)
+        ax.tick_params(labelsize=8, colors=self._TEXT_DIM, direction='in', length=2,
+                       top=False, bottom=True, left=False, right=True)
+        for s in ['top', 'left']:
+            ax.spines[s].set_visible(False)
+        for s in ['right', 'bottom']:
+            ax.spines[s].set_color(self._GRID)
         ax.yaxis.set_label_position('right')
         ax.yaxis.tick_right()
+        ax.grid(True, axis='y', color=self._GRID, linewidth=0.4, alpha=0.8)
+        ax.set_axisbelow(True)
+        if not show_xlabels:
+            ax.tick_params(labelbottom=False)
 
-    def plot_rsi(self):
-        """绘制RSI指标图（深色主题）"""
-        rsi_values = self.calculate_rsi(self.kline_close)
+    def _fmt_vol(self, x, p):
+        if x >= 1e8:
+            return f'{x/1e8:.1f}亿'
+        if x >= 1e4:
+            return f'{x/1e4:.0f}万'
+        return f'{int(x)}'
 
-        if not rsi_values:
+    # ========== 十字光标 ==========
+
+    def _clear_hover(self):
+        for artist in [self.hover_vline, self.hover_hline, self.hover_price_label, self.hover_date_label]:
+            if artist is not None:
+                try:
+                    artist.remove()
+                except Exception:
+                    pass
+        for t in self.hover_info_texts:
+            try:
+                t.remove()
+            except Exception:
+                pass
+        self.hover_info_texts.clear()
+        self.hover_vline = self.hover_hline = self.hover_price_label = self.hover_date_label = None
+
+    def on_hover(self, event):
+        """十字光标悬停（分时图）"""
+        if event.inaxes not in (self.ax_price, self.ax_volume):
+            self._clear_hover()
+            self.canvas.draw_idle()
             return
 
-        self.ax_price.clear()
-        self.ax_volume.clear()
-        self._style_dark_axis(self.ax_price)
-        self._style_dark_axis(self.ax_volume)
-
-        x_range = range(len(rsi_values))
-
-        # RSI线
-        self.ax_price.plot(x_range, rsi_values, color='#4da6ff', linewidth=1.2, label='RSI(6)')
-
-        # 超买超卖参考线
-        self.ax_price.axhline(y=80, color='#ef5350', linestyle='--', linewidth=0.6, alpha=0.5, label='超买(80)')
-        self.ax_price.axhline(y=20, color='#26a69a', linestyle='--', linewidth=0.6, alpha=0.5, label='超卖(20)')
-        self.ax_price.axhline(y=50, color='#787b86', linestyle='-', linewidth=0.4, alpha=0.3)
-
-        # 超买超卖区域填充
-        self.ax_price.fill_between(x_range, 80, 100, color='#ef5350', alpha=0.05)
-        self.ax_price.fill_between(x_range, 0, 20, color='#26a69a', alpha=0.05)
-
-        self.ax_price.set_ylabel('RSI', fontsize=10, color='#787b86')
-        self.ax_price.set_ylim(0, 100)
-        legend = self.ax_price.legend(loc='upper left', fontsize=8, ncol=3,
-                                      framealpha=0.6, edgecolor='#2a2e39', facecolor='#1e222d',
-                                      labelcolor='#d1d4dc')
-        self.ax_price.set_xticks([])
-
-        # RSI柱状图
-        colors = ['#ef5350' if v > 80 else '#26a69a' if v < 20 else '#363a45' for v in rsi_values]
-        self.ax_volume.bar(x_range, rsi_values, color=colors, width=0.6, alpha=0.6, edgecolor='none')
-
-        step = max(1, len(self.kline_dates) // 8)
-        self.ax_volume.set_xticks(range(0, len(self.kline_dates), step))
-        self.ax_volume.set_xticklabels([self.kline_dates[i][5:] for i in range(0, len(self.kline_dates), step)],
-                                      rotation=0, fontsize=8, color='#787b86')
-        for label in self.ax_volume.get_yticklabels():
-            label.set_fontsize(8)
-            label.set_color('#787b86')
-
-        self.figure.tight_layout()
-        self.canvas.draw()
-
-    def plot_kdj(self):
-        """绘制KDJ指标图（深色主题）"""
-        k_values, d_values, j_values = self.calculate_kdj(self.kline_high, self.kline_low, self.kline_close)
-
-        if not k_values or not d_values or not j_values:
+        x_data = event.xdata
+        if x_data is None or not self.time_data:
+            self._clear_hover()
+            self.canvas.draw_idle()
             return
 
-        self.ax_price.clear()
-        self.ax_volume.clear()
-        self._style_dark_axis(self.ax_price)
-        self._style_dark_axis(self.ax_volume)
+        self._clear_hover()
 
-        x_range = range(len(self.kline_dates))
-
-        # K、D、J线
-        self.ax_price.plot(x_range, k_values, color='#f5c842', linewidth=1.0, label='K', alpha=0.9)
-        self.ax_price.plot(x_range, d_values, color='#4da6ff', linewidth=1.0, label='D', alpha=0.9)
-        self.ax_price.plot(x_range, j_values, color='#ff6f91', linewidth=1.0, label='J', alpha=0.9)
-
-        # 超买超卖参考线
-        self.ax_price.axhline(y=80, color='#ef5350', linestyle='--', linewidth=0.5, alpha=0.4)
-        self.ax_price.axhline(y=20, color='#26a69a', linestyle='--', linewidth=0.5, alpha=0.4)
-
-        self.ax_price.set_ylabel('KDJ', fontsize=10, color='#787b86')
-        self.ax_price.set_ylim(-10, 110)
-        legend = self.ax_price.legend(loc='upper left', fontsize=8, ncol=3,
-                                      framealpha=0.6, edgecolor='#2a2e39', facecolor='#1e222d',
-                                      labelcolor='#d1d4dc')
-        self.ax_price.set_xticks([])
-
-        # J值柱状图
-        colors = ['#ef5350' if v > 80 else '#26a69a' if v < 20 else '#363a45' for v in j_values]
-        self.ax_volume.bar(x_range, j_values, color=colors, width=0.6, alpha=0.6, edgecolor='none')
-        self.ax_volume.axhline(y=0, color='#787b86', linestyle='-', linewidth=0.4, alpha=0.3)
-
-        step = max(1, len(self.kline_dates) // 8)
-        self.ax_volume.set_xticks(range(0, len(self.kline_dates), step))
-        self.ax_volume.set_xticklabels([self.kline_dates[i][5:] for i in range(0, len(self.kline_dates), step)],
-                                      rotation=0, fontsize=8, color='#787b86')
-        for label in self.ax_volume.get_yticklabels():
-            label.set_fontsize(8)
-            label.set_color('#787b86')
-
-        self.figure.tight_layout()
-        self.canvas.draw()
-
-    def plot_macd(self):
-        """绘制MACD指标图（深色主题）"""
-        dif, dea, macd = self.calculate_macd(self.kline_close)
-
-        if not dif or not dea or not macd:
+        idx = int(round(x_data))
+        if idx < 0 or idx >= len(self.time_data):
             return
 
-        self.ax_price.clear()
-        self.ax_volume.clear()
-        self._style_dark_axis(self.ax_price)
-        self._style_dark_axis(self.ax_volume)
+        # 竖线
+        self.hover_vline = self.ax_price.axvline(x=self.time_data[idx], color='#758696',
+                                                  linewidth=0.5, linestyle='--', alpha=0.7)
+        # 更新info_label
+        price = self.price_data[idx]
+        vol = self.volume_data[idx]
+        t = self.time_data[idx].strftime('%H:%M')
+        self.info_label.setText(f'{t}  价格:{price:.2f}  量:{vol}')
+        self.canvas.draw_idle()
 
-        x_range = range(len(self.kline_dates))
-
-        # DIF和DEA线
-        self.ax_price.plot(x_range, dif, color='#f5c842', linewidth=1.2, label='DIF')
-        self.ax_price.plot(x_range, dea, color='#4da6ff', linewidth=1.2, label='DEA')
-
-        # 零轴
-        self.ax_price.axhline(y=0, color='#787b86', linestyle='-', linewidth=0.4, alpha=0.4)
-
-        self.ax_price.set_ylabel('MACD', fontsize=10, color='#787b86')
-        legend = self.ax_price.legend(loc='upper left', fontsize=8, ncol=2,
-                                      framealpha=0.6, edgecolor='#2a2e39', facecolor='#1e222d',
-                                      labelcolor='#d1d4dc')
-        self.ax_price.set_xticks([])
-
-        # MACD柱状图
-        colors = ['#ef5350' if v >= 0 else '#26a69a' for v in macd]
-        self.ax_volume.bar(x_range, macd, color=colors, width=0.6, alpha=0.7, edgecolor='none')
-        self.ax_volume.axhline(y=0, color='#787b86', linestyle='-', linewidth=0.4, alpha=0.4)
-
-        step = max(1, len(self.kline_dates) // 8)
-        self.ax_volume.set_xticks(range(0, len(self.kline_dates), step))
-        self.ax_volume.set_xticklabels([self.kline_dates[i][5:] for i in range(0, len(self.kline_dates), step)],
-                                      rotation=0, fontsize=8, color='#787b86')
-        for label in self.ax_volume.get_yticklabels():
-            label.set_fontsize(8)
-            label.set_color('#787b86')
-
-        self.figure.tight_layout()
-        self.canvas.draw()
+    # ========== 分时图 ==========
 
     def generate_mock_intraday_data(self, prev_close: float, open_price: float):
-        """生成模拟分时数据（实际应从API获取）"""
+        """生成模拟分时数据"""
         base_price = open_price
         base_time = datetime.datetime.now().replace(hour=9, minute=30, second=0, microsecond=0)
 
-        for i in range(240):  # 4小时交易时间，每分钟一个点
+        for i in range(240):
             current_time = base_time + datetime.timedelta(minutes=i)
-            # 模拟价格波动
             price_change = (i - 120) * 0.01 * (prev_close / 100)
             price = base_price + price_change + (i % 10) * 0.02
-
-            # 模拟成交量
             volume = abs(int((100000 + i * 500 + (i % 20) * 1000) * (1 + 0.1 * (i % 3 - 1))))
 
-            # 跳过午休时间 11:30-13:00
             if 9.5 <= (current_time.hour + current_time.minute / 60) < 11.5 or \
                13 <= (current_time.hour + current_time.minute / 60) < 15:
                 self.time_data.append(current_time)
@@ -1877,93 +1773,69 @@ class StockDetailDialog(QDialog):
                 self.volume_data.append(volume)
 
     def plot_charts(self, current_price: float, prev_close: float, open_price: float):
-        """绘制分时图（深色主题）"""
+        """绘制分时走势图"""
         self.ax_price.clear()
         self.ax_volume.clear()
-        self._style_dark_axis(self.ax_price)
-        self._style_dark_axis(self.ax_volume)
+        self._setup_axis(self.ax_price, show_xlabels=False)
+        self._setup_axis(self.ax_volume, show_xlabels=True)
 
         if not self.time_data:
-            self.ax_price.text(0.5, 0.5, '暂无数据',
-                              ha='center', va='center', fontsize=14, color='#787b86',
-                              transform=self.ax_price.transAxes)
+            self.ax_price.text(0.5, 0.5, '暂无数据', ha='center', va='center',
+                              fontsize=14, color=self._TEXT_DIM, transform=self.ax_price.transAxes)
             self.canvas.draw()
             return
 
-        # 涨跌颜色
         price_change = current_price - prev_close
-        price_change_pct = (price_change / prev_close) * 100 if prev_close > 0 else 0
+        price_pct = (price_change / prev_close) * 100 if prev_close > 0 else 0
         is_up = price_change >= 0
-        price_color = '#ef5350' if is_up else '#26a69a'
+        color = self._UP_COLOR if is_up else self._DOWN_COLOR
 
-        # 价格走势
-        self.ax_price.plot(self.time_data, self.price_data,
-                          color=price_color, linewidth=1.5, label='价格')
+        # 价格线
+        self.ax_price.plot(self.time_data, self.price_data, color=color, linewidth=1.2,
+                          antialiased=True, zorder=3)
 
-        # 填充区域
-        self.ax_price.fill_between(self.time_data, self.price_data,
-                                   prev_close, where=[p >= prev_close for p in self.price_data],
-                                   color='#ef5350', alpha=0.08, interpolate=True)
-        self.ax_price.fill_between(self.time_data, self.price_data,
-                                   prev_close, where=[p < prev_close for p in self.price_data],
-                                   color='#26a69a', alpha=0.08, interpolate=True)
+        # 渐变填充
+        self.ax_price.fill_between(self.time_data, self.price_data, prev_close,
+                                   where=[p >= prev_close for p in self.price_data],
+                                   color=self._UP_COLOR, alpha=0.06, interpolate=True)
+        self.ax_price.fill_between(self.time_data, self.price_data, prev_close,
+                                   where=[p < prev_close for p in self.price_data],
+                                   color=self._DOWN_COLOR, alpha=0.06, interpolate=True)
 
         # 均价线
         if self.avg_price_data and len(self.avg_price_data) == len(self.time_data):
             self.ax_price.plot(self.time_data, self.avg_price_data,
-                              color='#ffa726', linewidth=1.2, linestyle='-',
-                              label='均价', alpha=0.8)
+                              color='#ffa726', linewidth=0.9, alpha=0.8, antialiased=True)
 
-        # 昨收线
-        self.ax_price.axhline(y=prev_close, color='#787b86', linestyle='--',
-                             linewidth=0.8, alpha=0.4)
+        # 昨收参考线
+        self.ax_price.axhline(y=prev_close, color=self._TEXT_DIM, linestyle='--',
+                             linewidth=0.6, alpha=0.5)
 
-        # y轴范围
-        price_min = min(self.price_data)
-        price_max = max(self.price_data)
-        padding = (price_max - price_min) * 0.1
-        self.ax_price.set_ylim(price_min - padding, price_max + padding)
-
-        # 格式化价格
-        self.ax_price.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.2f}'))
+        # 价格格式
+        self.ax_price.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, p: f'{v:.2f}'))
+        p_min, p_max = min(self.price_data), max(self.price_data)
+        pad = max((p_max - p_min) * 0.1, prev_close * 0.005)
+        self.ax_price.set_ylim(p_min - pad, p_max + pad)
 
         # 成交量
-        colors = []
+        v_colors = []
         for i in range(len(self.time_data)):
-            if i == 0:
-                colors.append('#ef5350' if self.price_data[i] >= prev_close else '#26a69a')
-            else:
-                colors.append('#ef5350' if self.price_data[i] >= self.price_data[i-1] else '#26a69a')
+            prev = prev_close if i == 0 else self.price_data[i - 1]
+            v_colors.append(self._UP_COLOR if self.price_data[i] >= prev else self._DOWN_COLOR)
+        self.ax_volume.bar(self.time_data, self.volume_data, color=v_colors,
+                          width=0.00035, alpha=0.55, edgecolor='none')
 
-        self.ax_volume.bar(self.time_data, self.volume_data, color=colors,
-                          width=0.0003, alpha=0.6, edgecolor='none')
-
-        # x轴时间格式
         self.ax_volume.xaxis.set_major_locator(MinuteLocator(interval=30))
         self.ax_volume.xaxis.set_major_formatter(DateFormatter('%H:%M'))
+        self.ax_volume.yaxis.set_major_formatter(plt.FuncFormatter(self._fmt_vol))
 
-        def volume_formatter(x, p):
-            if x >= 10000:
-                return f'{x/10000:.1f}万'
-            return f'{int(x)}'
+        # 更新标题
+        sign = '+' if is_up else ''
+        self.price_label.setText(f'{current_price:.2f}')
+        self.price_label.setStyleSheet(f'font-size: 15px; font-weight: bold; color: {color};')
+        self.change_label.setText(f'{sign}{price_change:.2f}  {sign}{price_pct:.2f}%')
+        self.change_label.setStyleSheet(f'font-size: 13px; font-weight: bold; color: {color};')
 
-        self.ax_volume.yaxis.set_major_formatter(plt.FuncFormatter(volume_formatter))
-
-        # 标签样式
-        for label in self.ax_price.get_yticklabels():
-            label.set_fontsize(9)
-            label.set_color('#787b86')
-        for label in self.ax_volume.get_xticklabels() + self.ax_volume.get_yticklabels():
-            label.set_fontsize(8)
-            label.set_color('#787b86')
-
-        # 图例
-        self.ax_price.legend(loc='upper left', fontsize=8, ncol=2,
-                            framealpha=0.6, edgecolor='#2a2e39', facecolor='#1e222d',
-                            labelcolor='#d1d4dc')
-
-        self.figure.autofmt_xdate()
-        self.figure.tight_layout()
         self.canvas.draw()
 
 
@@ -1978,8 +1850,12 @@ class StockDesktopWidget(QWidget):
         self.drag_position = None
         self.window_opacity = 0.85  # 默认透明度
         self.refresh_interval = 5  # 默认刷新间隔（秒）
+        self.alerts = []  # 价格预警列表
+        self.groups = {}  # 分组 {组名: [股票代码列表]}
+        self._current_group = '全部'
         self.init_ui()
         self.load_config()
+        self._rebuild_group_tabs()
         self.setup_timer()
         self.setup_system_tray()
 
@@ -2004,6 +1880,44 @@ class StockDesktopWidget(QWidget):
         self.title_label.setStyleSheet('color: #000000;')
         title_layout.addWidget(self.title_label)
         title_layout.addStretch()
+
+        # 五档盘口按钮
+        self.bidask_btn = QPushButton('📊')
+        self.bidask_btn.setFixedSize(30, 30)
+        self.bidask_btn.setStyleSheet('''
+            QPushButton {
+                background: transparent;
+                color: #000000;
+                font-size: 16px;
+                border: none;
+            }
+            QPushButton:hover {
+                background: #0078d4;
+                color: #ffffff;
+                border-radius: 15px;
+            }
+        ''')
+        self.bidask_btn.clicked.connect(self.show_bidask_dialog)
+        title_layout.addWidget(self.bidask_btn)
+
+        # 预警按钮
+        self.alert_btn = QPushButton('🔔')
+        self.alert_btn.setFixedSize(30, 30)
+        self.alert_btn.setStyleSheet('''
+            QPushButton {
+                background: transparent;
+                color: #000000;
+                font-size: 16px;
+                border: none;
+            }
+            QPushButton:hover {
+                background: #0078d4;
+                color: #ffffff;
+                border-radius: 15px;
+            }
+        ''')
+        self.alert_btn.clicked.connect(self.show_alert_dialog)
+        title_layout.addWidget(self.alert_btn)
 
         # 做T计算器按钮
         self.calculator_btn = QPushButton('💰')
@@ -2083,6 +1997,45 @@ class StockDesktopWidget(QWidget):
 
         self.main_layout.addLayout(title_layout)
 
+        # === 分组标签栏 ===
+        tab_bar = QHBoxLayout()
+        tab_bar.setSpacing(2)
+        tab_bar.setContentsMargins(0, 2, 0, 2)
+
+        self._group_btns = []
+        btn_all = QPushButton('全部')
+        btn_all.setCheckable(True)
+        btn_all.setChecked(True)
+        btn_all.setStyleSheet('''
+            QPushButton {
+                background: transparent; color: #787b86; border: none;
+                padding: 3px 10px; border-radius: 2px;
+                font-size: 11px; font-weight: bold;
+            }
+            QPushButton:hover { background: #e0e0e0; }
+            QPushButton:checked { background: #0078d4; color: #ffffff; border-radius: 2px; }
+        ''')
+        btn_all.clicked.connect(lambda: self._switch_group('全部'))
+        tab_bar.addWidget(btn_all)
+        self._group_btns.append(('全部', btn_all))
+
+        # "+" 新建分组按钮
+        add_grp_btn = QPushButton('+')
+        add_grp_btn.setFixedSize(24, 24)
+        add_grp_btn.setStyleSheet('''
+            QPushButton {
+                background: transparent; color: #999; border: none;
+                font-size: 14px; font-weight: bold;
+            }
+            QPushButton:hover { background: #e0e0e0; border-radius: 2px; }
+        ''')
+        add_grp_btn.clicked.connect(self._add_group)
+        tab_bar.addWidget(add_grp_btn)
+
+        tab_bar.addStretch()
+        self._tab_bar_layout = tab_bar
+        self.main_layout.addLayout(tab_bar)
+
         # 创建滚动区域
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
@@ -2119,6 +2072,8 @@ class StockDesktopWidget(QWidget):
             self.pinned_stocks = set(config.get('pinned', []))
             self.window_opacity = config.get('opacity', 0.85)
             self.refresh_interval = config.get('refresh_interval', 5)
+            self.alerts = config.get('alerts', [])
+            self.groups = config.get('groups', {})
             # 应用加载的设置
             self.setWindowOpacity(self.window_opacity)
         except:
@@ -2127,6 +2082,8 @@ class StockDesktopWidget(QWidget):
             self.pinned_stocks = set()
             self.window_opacity = 0.85
             self.refresh_interval = 5
+            self.alerts = []
+            self.groups = {}
 
     def save_config(self):
         """保存配置文件"""
@@ -2135,7 +2092,9 @@ class StockDesktopWidget(QWidget):
                 'stocks': self.stocks,
                 'pinned': list(self.pinned_stocks),
                 'opacity': self.window_opacity,
-                'refresh_interval': self.refresh_interval
+                'refresh_interval': self.refresh_interval,
+                'alerts': self.alerts,
+                'groups': self.groups
             }
             with open('config.json', 'w', encoding='utf-8') as f:
                 json.dump(config, f, ensure_ascii=False, indent=2)
@@ -2144,12 +2103,84 @@ class StockDesktopWidget(QWidget):
 
     def show_manage_dialog(self):
         """显示股票管理对话框"""
-        dialog = StockManageDialog(self.stocks, self.pinned_stocks, self)
+        dialog = StockManageDialog(self.stocks, self.pinned_stocks, self.groups, self)
         if dialog.exec_() == QDialog.Accepted:
             self.stocks = dialog.get_stocks()
             self.pinned_stocks = dialog.get_pinned_stocks()
+            self.groups = dialog.get_groups()
             self.save_config()
+            self._rebuild_group_tabs()
             self.update_stock_display()
+
+    # ========== 分组管理 ==========
+
+    def _switch_group(self, group_name):
+        """切换分组"""
+        self._current_group = group_name
+        for name, btn in self._group_btns:
+            btn.setChecked(name == group_name)
+        self.update_stock_display()
+
+    def _add_group(self):
+        """新建分组"""
+        name, ok = _chinese_input_dialog(self, '新建分组', '分组名称：')
+        if ok and name:
+            if name in self.groups or name == '全部':
+                return
+            self.groups[name] = []
+            self.save_config()
+            self._rebuild_group_tabs()
+            self._switch_group(name)
+
+    def _remove_group(self, name):
+        """删除分组"""
+        if name in self.groups:
+            del self.groups[name]
+            self.save_config()
+            self._rebuild_group_tabs()
+            if self._current_group == name:
+                self._switch_group('全部')
+
+    def _rebuild_group_tabs(self):
+        """重建分组标签栏"""
+        # 移除旧的分组按钮（保留"全部"和"+"按钮）
+        for name, btn in self._group_btns[1:]:
+            self._tab_bar_layout.removeWidget(btn)
+            btn.deleteLater()
+        self._group_btns = self._group_btns[:1]
+
+        # 在 "+" 按钮之前插入分组标签
+        insert_idx = self._tab_bar_layout.count() - 2  # stretch 和 "+" 之前
+        for i, name in enumerate(self.groups.keys()):
+            btn = QPushButton(name)
+            btn.setCheckable(True)
+            btn.setStyleSheet('''
+                QPushButton {
+                    background: transparent; color: #787b86; border: none;
+                    padding: 3px 10px; border-radius: 2px;
+                    font-size: 11px; font-weight: bold;
+                }
+                QPushButton:hover { background: #e0e0e0; }
+                QPushButton:checked { background: #0078d4; color: #ffffff; border-radius: 2px; }
+            ''')
+            btn.clicked.connect(lambda _, n=name: self._switch_group(n))
+            # 右键删除分组
+            btn.setContextMenuPolicy(Qt.CustomContextMenu)
+            btn.customContextMenuRequested.connect(lambda _, n=name: self._remove_group(n))
+            self._tab_bar_layout.insertWidget(insert_idx + i, btn)
+            self._group_btns.append((name, btn))
+
+        # 恢复当前选中状态
+        found = False
+        for name, btn in self._group_btns:
+            if name == self._current_group:
+                btn.setChecked(True)
+                found = True
+            else:
+                btn.setChecked(False)
+        if not found:
+            self._current_group = '全部'
+            self._group_btns[0][1].setChecked(True)
 
     def show_settings_dialog(self):
         """显示设置对话框"""
@@ -2166,6 +2197,70 @@ class StockDesktopWidget(QWidget):
         """显示做T计算器对话框"""
         dialog = TCalculatorDialog(self)
         dialog.exec_()
+
+    def show_bidask_dialog(self, stock_code: str = None, stock_name: str = None):
+        """显示五档买卖盘"""
+        if stock_code is None:
+            # 从按钮触发，显示第一只股票
+            if self.stocks:
+                stock_code = self.stocks[0]
+            else:
+                return
+        if stock_name is None:
+            info = self.get_stock_price(stock_code)
+            stock_name = info.name if info else stock_code
+        dialog = BidAskDialog(stock_code, stock_name, self)
+        dialog.exec_()
+
+    def show_alert_dialog(self):
+        """显示价格预警设置"""
+        dialog = AlertDialog(self.alerts, self.stocks, self)
+        if dialog.exec_() == QDialog.Accepted:
+            self.alerts = dialog.get_alerts()
+            self.save_config()
+
+    def _check_alerts(self):
+        """检查预警条件"""
+        triggered_any = False
+        for alert in self.alerts:
+            if alert.get('triggered'):
+                continue
+            info = self.get_stock_price(alert['code'])
+            if not info:
+                continue
+            price = info.price
+            target = alert['target']
+            direction = alert['direction']
+
+            hit = (direction == 'above' and price >= target) or \
+                  (direction == 'below' and price <= target)
+            if hit:
+                alert['triggered'] = True
+                triggered_any = True
+                sign = '高于' if direction == 'above' else '低于'
+                color = '#ef5350' if direction == 'above' else '#26a69a'
+                QMessageBox.warning(
+                    self, '价格预警',
+                    f'<span style="font-size:14px;">'
+                    f'{alert.get("name", alert["code"])} ({alert["code"]})<br>'
+                    f'当前价: <b>{price:.2f}</b><br>'
+                    f'已{sign}目标价: <b style="color:{color}">{target:.2f}</b>'
+                    f'</span>'
+                )
+                # 蜂鸣声
+                QApplication.beep()
+
+        if triggered_any:
+            self.save_config()
+
+    def _reset_daily_alerts(self):
+        """每日首次刷新时重置已触发的预警"""
+        import datetime
+        today = datetime.date.today()
+        for alert in self.alerts:
+            if alert.get('triggered'):
+                alert['triggered'] = False
+        self.save_config()
 
     def show_stock_detail(self, stock_code: str, stock_name: str):
         """显示股票详情对话框"""
@@ -2237,7 +2332,7 @@ class StockDesktopWidget(QWidget):
                 if '~' in content:
                     data = content.split('~')
                     if len(data) > 32:
-                        return StockInfoWidget(
+                        info = StockInfoWidget(
                             code=stock_code,
                             name=data[1],
                             price=float(data[3]),
@@ -2245,6 +2340,17 @@ class StockDesktopWidget(QWidget):
                             change_percent=float(data[32]),
                             open_price=float(data[5])
                         )
+                        # 解析五档买卖盘 data[9]~data[28]
+                        if len(data) > 28:
+                            try:
+                                for i in range(5):
+                                    info.bid_prices[i] = float(data[9 + i * 2])   # 买1-5价
+                                    info.bid_vols[i] = int(float(data[10 + i * 2]))  # 买1-5量(手)
+                                    info.ask_prices[i] = float(data[19 + i * 2])   # 卖1-5价
+                                    info.ask_vols[i] = int(float(data[20 + i * 2]))  # 卖1-5量(手)
+                            except (ValueError, IndexError):
+                                pass
+                        return info
         except Exception as e:
             print(f"获取 {stock_code} 失败: {e}")
         return None
@@ -2263,8 +2369,15 @@ class StockDesktopWidget(QWidget):
         self.stock_widgets.append(header)
         self.content_layout.addWidget(header)
 
+        # 根据当前分组决定显示哪些股票
+        if self._current_group == '全部':
+            display_stocks = self.stocks
+        else:
+            group_codes = set(self.groups.get(self._current_group, []))
+            display_stocks = [s for s in self.stocks if s in group_codes]
+
         # 添加新标签
-        for stock_code in self.stocks:
+        for stock_code in display_stocks:
             stock_info = self.get_stock_price(stock_code)
             if stock_info:
                 label = self.create_stock_label(stock_info)
@@ -2273,6 +2386,10 @@ class StockDesktopWidget(QWidget):
 
         # 添加弹性空间到底部
         self.content_layout.addStretch()
+
+        # 检查价格预警
+        if self.alerts:
+            self._check_alerts()
 
     def create_stock_label(self, stock: StockInfoWidget) -> ClickableLabel:
         """创建股票信息标签"""
@@ -2293,6 +2410,7 @@ class StockDesktopWidget(QWidget):
         label.setTextFormat(Qt.RichText)
         label.setStyleSheet('padding: 2px 12px; font-family: Consolas, "Courier New", monospace;')
         label.set_clicked_callback(self.show_stock_detail)
+        label.set_right_callback(self.show_bidask_dialog)
         return label
 
     def setup_timer(self):
