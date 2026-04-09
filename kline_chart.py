@@ -40,6 +40,7 @@ class KLineDialog(QDialog):
     """专业K线图表对话框"""
 
     # 图表类型
+    TYPE_INTRADAY = '分时'
     TYPE_DAILY = '日K'
     TYPE_WEEKLY = '周K'
     TYPE_MONTHLY = '月K'
@@ -55,7 +56,7 @@ class KLineDialog(QDialog):
         super().__init__(parent)
         self.stock_code = stock_code
         self.stock_name = stock_name
-        self.chart_type = self.TYPE_DAILY
+        self.chart_type = self.TYPE_INTRADAY
         self.data_count = 120  # 默认显示120条
 
         # K线数据
@@ -65,6 +66,13 @@ class KLineDialog(QDialog):
         self.lows = []
         self.closes = []
         self.volumes = []
+
+        # 分时数据
+        self._fs_times = []
+        self._fs_prices = []
+        self._fs_avg = []
+        self._fs_vols = []
+        self._fs_prev_close = 0.0
 
         # 悬停
         self._hover_vline = None
@@ -88,7 +96,14 @@ class KLineDialog(QDialog):
         self._pan_start_xlim = None
 
         self._build_ui()
-        self._load_data(self.TYPE_DAILY)
+        self._load_intraday()
+        # 分时模式隐藏K线专属控件
+        for btn in self._count_btns:
+            btn.setVisible(False)
+        for btn in self._ind_btns:
+            btn.setVisible(False)
+        for btn in self._tool_btns.values():
+            btn.setVisible(False)
 
     # ================================================================
     #  UI
@@ -134,7 +149,7 @@ class KLineDialog(QDialog):
 
         # 周期切换按钮
         self._period_btns = []
-        for t in [self.TYPE_DAILY, self.TYPE_WEEKLY, self.TYPE_MONTHLY]:
+        for t in [self.TYPE_INTRADAY, self.TYPE_DAILY, self.TYPE_WEEKLY, self.TYPE_MONTHLY]:
             btn = QPushButton(t)
             btn.setCheckable(True)
             btn.clicked.connect(lambda _, ct=t: self._switch_period(ct))
@@ -251,7 +266,21 @@ class KLineDialog(QDialog):
         for btn in self._period_btns:
             btn.setChecked(btn.text() == chart_type)
         self.chart_type = chart_type
-        self._load_data(chart_type)
+        self._zoom_xlim = None
+        # 分时模式隐藏K线专属控件
+        is_fs = chart_type == self.TYPE_INTRADAY
+        for btn in self._count_btns:
+            btn.setVisible(not is_fs)
+        for btn in self._ind_btns:
+            btn.setVisible(not is_fs)
+        for btn in self._tool_btns.values():
+            btn.setVisible(not is_fs)
+        self.sender()  # avoid unused
+        # 刷新数据
+        if is_fs:
+            self._load_intraday()
+        else:
+            self._load_data(chart_type)
 
     def _switch_count(self, count):
         for btn in self._count_btns:
@@ -391,6 +420,202 @@ class KLineDialog(QDialog):
         self.volumes.append(today['volume'])
 
     # ================================================================
+    #  分时数据
+    # ================================================================
+
+    def _load_intraday(self):
+        """加载分时数据"""
+        # 检查缓存
+        key = f'fs_{self.stock_code}'
+        if key in self._cache:
+            ts, d = self._cache[key]
+            if (datetime.datetime.now() - ts).seconds < 120:
+                self._fs_times, self._fs_prices, self._fs_avg, self._fs_vols, self._fs_prev_close = d
+                self._draw_intraday()
+                return
+
+        code = self._code_prefix()
+        prev_close = self._fetch_prev_close(code)
+
+        # 获取分钟数据
+        try:
+            url = f'https://web.ifzq.gtimg.cn/appstock/app/minute/query?_var=min_data&code={code}'
+            r = requests.get(url, timeout=10, proxies={'http': None, 'https': None})
+            if r.status_code == 200:
+                content = r.text.strip()
+                if content.startswith('min_data='):
+                    content = content[9:]
+                data = json.loads(content)
+                if data.get('code') == 0:
+                    sd = data.get('data', {}).get(code, {})
+                    minute_list = sd.get('data', {}).get('data', [])
+                    if minute_list and prev_close:
+                        times, prices, avgs, vols = [], [], [], []
+                        today = datetime.datetime.now().date()
+                        for item in minute_list:
+                            parts = item.split()
+                            if len(parts) >= 3:
+                                t = parts[0]
+                                h, m = int(t[:2]), int(t[2:4])
+                                dt = datetime.datetime.combine(today, datetime.time(h, m))
+                                times.append(dt)
+                                prices.append(float(parts[1]))
+                                avgs.append(float(parts[2]))
+                                vols.append(int(float(parts[3])))
+
+                        # avgs 是累积成交量，转换为单分钟量
+                        minute_vols = [int(avgs[0])] if avgs else []
+                        for i in range(1, len(avgs)):
+                            minute_vols.append(int(avgs[i]) - int(avgs[i - 1]))
+
+                        self._fs_times = times
+                        self._fs_prices = prices
+                        self._fs_avg = [prices[0]] if prices else []  # parts[2]实际是累积量，暂用价格初始化
+                        self._fs_vols = minute_vols
+                        self._fs_prev_close = prev_close
+
+                        # 重新计算均价线
+                        total_amount = 0.0
+                        total_vol = 0
+                        self._fs_avg = []
+                        for pi, vi in zip(prices, minute_vols):
+                            total_amount += pi * vi
+                            total_vol += vi
+                            self._fs_avg.append(total_amount / total_vol if total_vol > 0 else pi)
+
+                        self._cache[key] = (datetime.datetime.now(),
+                                            (times[:], prices[:], avgs[:], vols[:], prev_close))
+                        self._draw_intraday()
+                        return
+        except Exception as e:
+            print(f'分时API失败: {e}')
+
+        # 生成模拟分时数据
+        if prev_close:
+            self._gen_mock_intraday(prev_close)
+            self._draw_intraday()
+
+    def _fetch_prev_close(self, code):
+        """获取昨收价"""
+        try:
+            url = f'http://qt.gtimg.cn/q={code}'
+            r = requests.get(url, timeout=10, proxies={'http': None, 'https': None})
+            if r.status_code == 200:
+                parts = r.content.decode('gbk').strip().split('~')
+                if len(parts) > 4:
+                    return float(parts[4])
+        except Exception:
+            pass
+        return None
+
+    def _gen_mock_intraday(self, prev_close):
+        """生成模拟分时数据"""
+        import random
+        times, prices, avgs, vols = [], [], [], []
+        today = datetime.datetime.now().date()
+        price = prev_close
+        total_vol = 0
+        total_amount = 0
+        for h, m_range in [(9, range(30, 60)), (10, range(0, 60)), (11, range(0, 30)),
+                           (13, range(0, 60)), (14, range(0, 60)), (15, range(0, 1))]:
+            for m in m_range:
+                dt = datetime.datetime.combine(today, datetime.time(h, m))
+                times.append(dt)
+                price += random.uniform(-prev_close * 0.002, prev_close * 0.002)
+                vol = random.randint(100, 5000)
+                total_vol += vol
+                total_amount += price * vol
+                prices.append(round(price, 2))
+                avgs.append(round(total_amount / total_vol, 2))
+                vols.append(vol)
+        self._fs_times = times
+        self._fs_prices = prices
+        self._fs_avg = avgs
+        self._fs_vols = vols
+        self._fs_prev_close = prev_close
+
+    def _draw_intraday(self):
+        """绘制分时走势图（无午休断档）"""
+        self._clear()
+        ax_p = self.ax_main
+        ax_v = self.ax_vol
+
+        if not self._fs_times:
+            ax_p.text(0.5, 0.5, '暂无分时数据', ha='center', va='center',
+                      fontsize=14, color=C_DIM, transform=ax_p.transAxes)
+            self.canvas.draw()
+            return
+
+        prev = self._fs_prev_close
+        cur = self._fs_prices[-1]
+        chg = cur - prev
+        pct = chg / prev * 100 if prev > 0 else 0
+        is_up = chg >= 0
+        color = C_UP if is_up else C_DOWN
+
+        # 用整数索引作为x轴，避免午休断档
+        n = len(self._fs_times)
+        x = np.arange(n)
+        p = self._fs_prices
+
+        # 渐变填充
+        ax_p.fill_between(x, p, prev,
+                          where=[v >= prev for v in p], color=C_UP, alpha=0.12, interpolate=True)
+        ax_p.fill_between(x, p, prev,
+                          where=[v < prev for v in p], color=C_DOWN, alpha=0.12, interpolate=True)
+
+        # 价格线
+        ax_p.plot(x, p, color=color, linewidth=1.5, antialiased=True, zorder=3)
+
+        # 均价线
+        if self._fs_avg:
+            ax_p.plot(x, self._fs_avg, color='#ffa726', linewidth=1.0, alpha=0.85, zorder=2)
+
+        # 昨收线
+        ax_p.axhline(prev, color=C_DIM, ls='--', lw=0.5, alpha=0.6)
+        ax_p.annotate(f'昨收 {prev:.2f}', xy=(1.0, prev), xycoords=('axes fraction', 'data'),
+                      fontsize=8, color=C_DIM, va='center',
+                      bbox=dict(boxstyle='round,pad=0.2', fc=C_BG, ec='none', alpha=0.8))
+
+        # Y轴对称
+        p_min, p_max = min(p), max(p)
+        max_dev = max(abs(p_max - prev), abs(p_min - prev), prev * 0.005)
+        ax_p.set_ylim(prev - max_dev * 1.15, prev + max_dev * 1.15)
+        ax_p.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f'{v:.2f}'))
+
+        # 右侧涨跌幅
+        ax_pct = ax_p.twinx()
+        ax_pct.set_facecolor('none')
+        ax_pct.tick_params(labelsize=8, colors=C_DIM, direction='in', length=2, left=False, right=True)
+        for s in ('top', 'left', 'bottom'):
+            ax_pct.spines[s].set_visible(False)
+        ax_pct.spines['right'].set_color(C_GRID)
+        ax_pct.yaxis.set_major_formatter(plt.FuncFormatter(
+            lambda v, _: f'{(v - prev) / prev * 100:+.2f}%'))
+        ax_pct.set_ylim(prev - max_dev * 1.15, prev + max_dev * 1.15)
+
+        # 成交量
+        v_colors = [C_UP if p[i] >= (prev if i == 0 else p[i-1])
+                    else C_DOWN for i in range(n)]
+        ax_v.bar(x, self._fs_vols, width=1.0, color=v_colors, alpha=0.7, edgecolor='none')
+        ax_v.yaxis.set_major_formatter(plt.FuncFormatter(self._vol_fmt))
+
+        # X轴时间标签
+        step = max(1, n // 6)
+        ticks = list(range(0, n, step))
+        time_labels = [self._fs_times[i].strftime('%H:%M') for i in ticks]
+        ax_v.set_xticks(ticks)
+        ax_v.set_xticklabels(time_labels, fontsize=8, color=C_DIM)
+
+        # 标题
+        sign = '+' if is_up else ''
+        self._price_lbl.setText(f'{cur:.2f}')
+        self._price_lbl.setStyleSheet(f'font-size: 14px; font-weight: bold; color: {color};')
+        self._change_lbl.setText(f'{sign}{chg:.2f}  {sign}{pct:.2f}%')
+        self._change_lbl.setStyleSheet(f'font-size: 12px; font-weight: bold; color: {color};')
+        self._info.setText(f'<span style="color:{C_DIM}">均价:{self._fs_avg[-1]:.2f}</span>')
+
+        self.canvas.draw()
     #  指标计算
     # ================================================================
 
@@ -680,6 +905,11 @@ class KLineDialog(QDialog):
                 setattr(self, attr, None)
 
     def _on_hover(self, event):
+        # 分时模式
+        if self.chart_type == self.TYPE_INTRADAY:
+            self._on_hover_intraday(event)
+            return
+
         if not self.dates:
             return
 
@@ -741,6 +971,46 @@ class KLineDialog(QDialog):
             self._hover_kdj(idx)
         elif ind == self.TYPE_RSI:
             self._hover_rsi(idx)
+        self.canvas.draw_idle()
+
+    def _on_hover_intraday(self, event):
+        """分时图十字光标"""
+        if event.inaxes not in (self.ax_main, self.ax_vol) or not self._fs_times:
+            self._clear_hover(); self.canvas.draw_idle(); return
+        xd = event.xdata
+        if xd is None:
+            self._clear_hover(); self.canvas.draw_idle(); return
+
+        self._clear_hover()
+
+        # 整数索引
+        idx = int(round(xd))
+        idx = max(0, min(idx, len(self._fs_times) - 1))
+
+        t = self._fs_times[idx]
+        price = self._fs_prices[idx]
+        vol = self._fs_vols[idx]
+        avg = self._fs_avg[idx] if self._fs_avg else 0
+
+        self._hover_vline = self.ax_main.axvline(idx, color=C_CROSS, lw=0.5, ls='--', alpha=0.7)
+        self._hover_vline_vol = self.ax_vol.axvline(idx, color=C_CROSS, lw=0.5, ls='--', alpha=0.7)
+        self._hover_hline = self.ax_main.axhline(price, color=C_CROSS, lw=0.5, ls='--', alpha=0.7)
+
+        prev = self._fs_prev_close
+        chg = price - prev
+        pct = chg / prev * 100 if prev else 0
+        sc = '+' if chg >= 0 else ''
+        col = C_UP if chg >= 0 else C_DOWN
+        vs = f'{vol}手'
+        t_str = t.strftime('%H:%M')
+
+        self._info.setTextFormat(Qt.RichText)
+        self._info.setText(
+            f'<span style="color:{C_DIM}">{t_str}</span> '
+            f'<span style="color:{col}">价格:{price:.2f}</span> '
+            f'<span style="color:{col}">{sc}{chg:.2f}({sc}{pct:.2f}%)</span> '
+            f'<span style="color:#ffa726">均价:{avg:.2f}</span> '
+            f'<span style="color:{C_DIM}">量:{vs}</span>')
         self.canvas.draw_idle()
 
     def _hover_kline(self, idx):
@@ -918,12 +1188,15 @@ class KLineDialog(QDialog):
             self._temp_line = None
 
     def _on_key(self, event):
-        """键盘事件 - Esc取消画线"""
+        """键盘事件 - Esc关闭或取消画线"""
         if event.key == 'escape':
-            self._draw_clicks.clear()
-            self._remove_temp_line()
-            self._switch_tool('hover')
-            self.canvas.draw_idle()
+            if self._tool_mode != 'hover':
+                self._draw_clicks.clear()
+                self._remove_temp_line()
+                self._switch_tool('hover')
+                self.canvas.draw_idle()
+            else:
+                self.close()
 
     def _redraw_tools(self):
         """重绘所有画线（在 _draw 之后调用）"""

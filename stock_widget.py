@@ -6,6 +6,7 @@
 
 import sys
 import json
+import ctypes
 import requests
 from kline_chart import KLineDialog
 from datetime import datetime
@@ -16,29 +17,6 @@ from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QVBoxLayout,
                              QSlider, QSpinBox, QGridLayout, QComboBox, QInputDialog)
 from PyQt5.QtCore import Qt, QTimer, QPoint, QRegExp
 from PyQt5.QtGui import QFont, QColor, QIcon, QDoubleValidator, QIntValidator, QRegExpValidator
-
-# 导入matplotlib用于绘制图表
-from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
-from matplotlib.figure import Figure
-import matplotlib.pyplot as plt
-from matplotlib.dates import DateFormatter, HourLocator, MinuteLocator
-import datetime
-import pandas as pd
-import numpy as np
-
-# 配置matplotlib中文字体和样式
-try:
-    plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'Arial Unicode MS']
-    plt.rcParams['axes.unicode_minus'] = False
-except:
-    plt.rcParams['font.sans-serif'] = ['DejaVu Sans']
-    plt.rcParams['axes.unicode_minus'] = False
-plt.rcParams['figure.facecolor'] = 'white'
-plt.rcParams['axes.facecolor'] = 'white'
-plt.rcParams['grid.alpha'] = 0.3
-plt.rcParams['grid.linestyle'] = '-'
-plt.rcParams['grid.linewidth'] = 0.5
 
 
 def _chinese_input_dialog(parent, title, label, text=''):
@@ -508,16 +486,22 @@ class StockManageDialog(QDialog):
 class SettingsDialog(QDialog):
     """设置对话框 - 支持配置透明度、刷新间隔等"""
 
-    def __init__(self, opacity: float, refresh_interval: int, parent=None):
+    def __init__(self, opacity: float, refresh_interval: int,
+                 hotkey_ctrl=True, hotkey_shift=True, hotkey_alt=False, hotkey_key='H',
+                 parent=None):
         super().__init__(parent)
         self.opacity = opacity
         self.refresh_interval = refresh_interval
+        self.hotkey_ctrl = hotkey_ctrl
+        self.hotkey_shift = hotkey_shift
+        self.hotkey_alt = hotkey_alt
+        self.hotkey_key = hotkey_key
         self.init_ui()
 
     def init_ui(self):
         """初始化界面"""
         self.setWindowTitle('设置')
-        self.setFixedSize(350, 250)
+        self.setFixedSize(350, 320)
         self.setStyleSheet('''
             QDialog {
                 background-color: #ffffff;
@@ -598,6 +582,35 @@ class SettingsDialog(QDialog):
         interval_layout.addStretch()
         layout.addLayout(interval_layout)
 
+        # 快捷键设置
+        hotkey_label = QLabel('全局快捷键（显示/隐藏窗口）：')
+        hotkey_label.setStyleSheet('font-size: 14px;')
+        layout.addWidget(hotkey_label)
+
+        hotkey_layout = QHBoxLayout()
+        from PyQt5.QtWidgets import QCheckBox
+        self._hk_ctrl = QCheckBox('Ctrl')
+        self._hk_ctrl.setChecked(self.hotkey_ctrl)
+        hotkey_layout.addWidget(self._hk_ctrl)
+        self._hk_shift = QCheckBox('Shift')
+        self._hk_shift.setChecked(self.hotkey_shift)
+        hotkey_layout.addWidget(self._hk_shift)
+        self._hk_alt = QCheckBox('Alt')
+        self._hk_alt.setChecked(self.hotkey_alt)
+        hotkey_layout.addWidget(self._hk_alt)
+        self._hk_key = QLineEdit(self.hotkey_key)
+        self._hk_key.setFixedWidth(40)
+        self._hk_key.setMaxLength(1)
+        self._hk_key.setAlignment(Qt.AlignCenter)
+        self._hk_key.setStyleSheet('''
+            QLineEdit { border: 1px solid #e0e0e0; border-radius: 4px;
+                        padding: 4px; font-size: 14px; font-weight: bold; text-transform: uppercase; }
+            QLineEdit:focus { border: 1px solid #0078d4; }
+        ''')
+        hotkey_layout.addWidget(self._hk_key)
+        hotkey_layout.addStretch()
+        layout.addLayout(hotkey_layout)
+
         # 说明文字
         info_label = QLabel('提示：透明度50%-100%，数字越小越透明')
         info_label.setStyleSheet('color: #888888; font-size: 12px;')
@@ -630,7 +643,9 @@ class SettingsDialog(QDialog):
 
     def get_settings(self):
         """获取设置"""
-        return self.opacity, self.interval_spinbox.value()
+        return (self.opacity, self.interval_spinbox.value(),
+                self._hk_ctrl.isChecked(), self._hk_shift.isChecked(),
+                self._hk_alt.isChecked(), self._hk_key.text().strip().upper() or 'H')
 
 
 class AlertDialog(QDialog):
@@ -1161,683 +1176,6 @@ class TCalculatorDialog(QDialog):
         self.calculate()
 
 
-class StockDetailDialog(QDialog):
-    """股票详情对话框 - 展示分时走势图和成交量"""
-
-    # 数据缓存
-    _cache = {}
-    _cache_timeout = 300  # 缓存5分钟
-
-    def __init__(self, stock_code: str, stock_name: str, parent=None):
-        super().__init__(parent)
-        self.stock_code = stock_code
-        self.stock_name = stock_name
-        self.time_data = []
-        self.price_data = []
-        self.volume_data = []
-        self.avg_price_data = []
-        
-        # 悬停显示
-        self.hover_vline = None
-        self.hover_hline = None
-        self.hover_price_label = None
-        self.hover_date_label = None
-        self.hover_info_texts = []
-
-        self.init_ui()
-        self.load_intraday_data()
-
-    def init_ui(self):
-        """初始化界面 - 仿同花顺/东方财富风格"""
-        self.setWindowTitle(f'{self.stock_code} - {self.stock_name}')
-        self.setFixedSize(1000, 800)
-        self.setStyleSheet('''
-            QDialog {
-                background-color: #161a25;
-            }
-            QLabel {
-                color: #d1d4dc;
-                font-size: 12px;
-                font-family: "Microsoft YaHei", "SimHei", sans-serif;
-            }
-            QPushButton {
-                background-color: transparent;
-                color: #787b86;
-                border: none;
-                padding: 5px 12px;
-                border-radius: 2px;
-                font-size: 12px;
-                font-weight: bold;
-                font-family: "Microsoft YaHei", "SimHei", sans-serif;
-            }
-            QPushButton:hover {
-                background-color: #2a2e39;
-                color: #d1d4dc;
-            }
-            QPushButton:checked {
-                background-color: #2962ff;
-                color: #ffffff;
-            }
-        ''')
-
-        layout = QVBoxLayout()
-        layout.setContentsMargins(6, 6, 6, 6)
-        layout.setSpacing(0)
-
-        # === 顶部标题栏 ===
-        header_layout = QHBoxLayout()
-        header_layout.setSpacing(12)
-
-        self.title_label = QLabel(f'{self.stock_name}')
-        self.title_label.setStyleSheet('font-size: 15px; font-weight: bold; color: #d1d4dc;')
-        header_layout.addWidget(self.title_label)
-
-        self.price_label = QLabel('')
-        self.price_label.setStyleSheet('font-size: 15px; font-weight: bold;')
-        header_layout.addWidget(self.price_label)
-
-        self.change_label = QLabel('')
-        self.change_label.setStyleSheet('font-size: 13px; font-weight: bold;')
-        header_layout.addWidget(self.change_label)
-
-        header_layout.addStretch()
-
-        # 图表类型切换按钮
-        self._chart_btns = []
-        btn_fs = QPushButton('分时')
-        btn_fs.setCheckable(True)
-        btn_fs.setChecked(True)
-        btn_fs.clicked.connect(lambda: self._switch_chart('分时'))
-        header_layout.addWidget(btn_fs)
-        self._chart_btns.append(btn_fs)
-
-        btn_kline = QPushButton('K线')
-        btn_kline.setCheckable(True)
-        btn_kline.clicked.connect(lambda: self._switch_chart('K线'))
-        header_layout.addWidget(btn_kline)
-        self._chart_btns.append(btn_kline)
-
-        layout.addLayout(header_layout)
-
-        # === 信息栏（显示悬停时的OHLC数据） ===
-        self.info_label = QLabel('')
-        self.info_label.setStyleSheet('font-size: 11px; color: #787b86; padding: 2px 4px;')
-        self.info_label.setFixedHeight(20)
-        layout.addWidget(self.info_label)
-
-        # === 图表区域 ===
-        self.figure = Figure(figsize=(10, 7.2), dpi=100, facecolor='#131722')
-        self.canvas = FigureCanvas(self.figure)
-
-        # 使用GridSpec实现价格区75% + 成交量区25%
-        from matplotlib.gridspec import GridSpec
-        self.gs = GridSpec(2, 1, height_ratios=[3, 1], figure=self.figure, hspace=0)
-        self.ax_price = self.figure.add_subplot(self.gs[0])
-        self.ax_volume = self.figure.add_subplot(self.gs[1], sharex=self.ax_price)
-
-        self.figure.subplots_adjust(left=0.05, right=0.95, top=0.98, bottom=0.04)
-
-        # 深色坐标轴
-        for ax in [self.ax_price, self.ax_volume]:
-            ax.set_facecolor('#131722')
-            ax.tick_params(labelsize=9, colors='#787b86', direction='in', length=3)
-            for spine in ax.spines.values():
-                spine.set_color('#1e222d')
-            ax.yaxis.set_label_position('right')
-            ax.yaxis.tick_right()
-
-        # 隐藏价格图x轴标签
-        plt.setp(self.ax_price.get_xticklabels(), visible=False)
-
-        self.canvas.mpl_connect('motion_notify_event', self.on_hover)
-
-        layout.addWidget(self.canvas)
-        self.setLayout(layout)
-
-        # 更新标题价格信息
-        self._update_header_price()
-
-    def _update_header_price(self):
-        """更新标题栏价格信息"""
-        try:
-            real_data = self.get_today_real_data()
-            if real_data:
-                price = real_data['close']
-                prev_close = real_data['prev_close']
-                change = price - prev_close
-                change_pct = change / prev_close * 100 if prev_close > 0 else 0
-                is_up = change >= 0
-                color = '#ef5350' if is_up else '#26a69a'
-                sign = '+' if is_up else ''
-
-                self.price_label.setText(f'{price:.2f}')
-                self.price_label.setStyleSheet(f'font-size: 15px; font-weight: bold; color: {color};')
-                self.change_label.setText(f'{sign}{change:.2f}  {sign}{change_pct:.2f}%')
-                self.change_label.setStyleSheet(f'font-size: 13px; font-weight: bold; color: {color};')
-        except Exception:
-            pass
-
-    @classmethod
-    def _get_cache_key(cls, data_type: str, stock_code: str) -> str:
-        """生成缓存键"""
-        return f"{data_type}_{stock_code}"
-
-    @classmethod
-    def _get_from_cache(cls, cache_key: str):
-        """从缓存获取数据"""
-        if cache_key in cls._cache:
-            cached_data, timestamp = cls._cache[cache_key]
-            if datetime.datetime.now().timestamp() - timestamp < cls._cache_timeout:
-                return cached_data
-        return None
-
-    @classmethod
-    def _save_to_cache(cls, cache_key: str, data):
-        """保存数据到缓存"""
-        cls._cache[cache_key] = (data, datetime.datetime.now().timestamp())
-
-    def _open_kline(self):
-        """打开K线图"""
-        dialog = KLineDialog(self.stock_code, self.stock_name, self)
-        dialog.show()
-
-    def _switch_chart(self, chart_type):
-        """切换分时/K线"""
-        for btn in self._chart_btns:
-            btn.setChecked(btn.text() == chart_type)
-        if chart_type == 'K线':
-            self._open_kline()
-
-    def load_intraday_data(self):
-        """加载分时数据"""
-        cache_key = self._get_cache_key('intraday', self.stock_code)
-        cached_data = self._get_from_cache(cache_key)
-
-        if cached_data:
-            self.time_data = cached_data['time_data']
-            self.price_data = cached_data['price_data']
-            self.volume_data = cached_data['volume_data']
-            self.avg_price_data = cached_data['avg_price_data']
-
-            if self.time_data:
-                prev_close = self.price_data[0] if len(self.price_data) > 0 else 100.0
-                current_price = self.price_data[-1] if len(self.price_data) > 0 else 100.0
-                open_price = self.price_data[0] if len(self.price_data) > 0 else 100.0
-                self.plot_charts(current_price, prev_close, open_price)
-                return
-
-        # 优先从腾讯API获取真实分钟数据
-        if self.fetch_real_intraday_data():
-            return
-
-        # 尝试网易分时API
-        try:
-            code = self.stock_code
-            if code.startswith('sh') or code.startswith('sz'):
-                code = code[2:]
-            api_url = f"http://img1.money.126.net/data/hs/time/today/{code}.json"
-            response = requests.get(api_url, timeout=10, proxies={'http': None, 'https': None})
-
-            if response.status_code == 200:
-                data = response.json()
-                if 'data' in data and data['data']:
-                    self.parse_intraday_data(data['data'], data.get('code', self.stock_code), data.get('name', self.stock_name))
-                    cache_data = {
-                        'time_data': self.time_data,
-                        'price_data': self.price_data,
-                        'volume_data': self.volume_data,
-                        'avg_price_data': self.avg_price_data
-                    }
-                    self._save_to_cache(cache_key, cache_data)
-                    return
-        except Exception as e:
-            print(f"网易分时API失败: {e}")
-
-        self.load_from_sina_api()
-
-    def fetch_real_intraday_data(self):
-        """从腾讯API获取真实分时分钟数据"""
-        try:
-            if self.stock_code.startswith('sh') or self.stock_code.startswith('sz'):
-                code_with_prefix = self.stock_code
-            else:
-                code_prefix = "sh" if self.stock_code.startswith(("6", "5")) else "sz"
-                code_with_prefix = f"{code_prefix}{self.stock_code}"
-
-            api_url = f"https://web.ifzq.gtimg.cn/appstock/app/minute/query?_var=min_data&code={code_with_prefix}"
-            response = requests.get(api_url, timeout=10, proxies={'http': None, 'https': None})
-
-            if response.status_code == 200:
-                content = response.text.strip()
-                if content.startswith('min_data='):
-                    content = content[len('min_data='):]
-
-                data = json.loads(content)
-                if data.get('code') == 0:
-                    stock_data = data.get('data', {}).get(code_with_prefix, {})
-                    minute_list = stock_data.get('data', {}).get('data', [])
-
-                    if not minute_list:
-                        return False
-
-                    # 从qt获取昨收价
-                    prev_close = None
-                    qt_data = stock_data.get('qt', {}).get(code_with_prefix, [])
-                    if len(qt_data) > 4:
-                        try:
-                            prev_close = float(qt_data[4])
-                        except (ValueError, TypeError):
-                            pass
-
-                    # 如果qt没有昨收，从实时API获取
-                    if not prev_close:
-                        real_data = self.get_today_real_data()
-                        if real_data:
-                            prev_close = real_data['prev_close']
-
-                    if not prev_close:
-                        return False
-
-                    self.time_data = []
-                    self.price_data = []
-                    self.volume_data = []
-                    self.avg_price_data = []
-
-                    today = datetime.datetime.now().date()
-                    for item in minute_list:
-                        parts = item.split()
-                        if len(parts) >= 4:
-                            time_str = parts[0]
-                            price = float(parts[1])
-                            avg_price = float(parts[2])
-                            volume = int(parts[3])
-
-                            hour = int(time_str[:2])
-                            minute = int(time_str[2:4])
-                            dt = datetime.datetime.combine(today, datetime.time(hour, minute))
-
-                            self.time_data.append(dt)
-                            self.price_data.append(price)
-                            self.avg_price_data.append(avg_price)
-                            self.volume_data.append(volume)
-
-                    if self.time_data:
-                        current_price = self.price_data[-1]
-                        open_price = self.price_data[0]
-                        self.plot_charts(current_price, prev_close, open_price)
-
-                        cache_key = self._get_cache_key('intraday', self.stock_code)
-                        self._save_to_cache(cache_key, {
-                            'time_data': self.time_data,
-                            'price_data': self.price_data,
-                            'volume_data': self.volume_data,
-                            'avg_price_data': self.avg_price_data
-                        })
-                        print(f"获取到 {len(self.time_data)} 条真实分时数据")
-                        return True
-        except Exception as e:
-            print(f"获取腾讯分时数据失败: {e}")
-        return False
-    
-    def load_from_sina_api(self):
-        """从新浪API加载基础数据并生成模拟数据"""
-        try:
-            # 判断代码是否已包含前缀
-            if self.stock_code.startswith('sh') or self.stock_code.startswith('sz'):
-                code_with_prefix = self.stock_code
-            else:
-                code_prefix = "sh" if self.stock_code.startswith(("6", "5")) else "sz"
-                code_with_prefix = f"{code_prefix}{self.stock_code}"
-
-            api_url = f"http://hq.sinajs.cn/list={code_with_prefix}"
-
-            # 禁用代理，避免连接到本地代理导致超时
-            response = requests.get(api_url, timeout=5, proxies={'http': None, 'https': None})
-
-            if response.status_code == 200:
-                # 手动解码GBK编码的响应
-                content = response.content.decode('gbk').strip()
-                if '=' in content and '"' in content:
-                    data_str = content.split('"')[1]
-                    parts = data_str.split(',')
-
-                    if len(parts) > 32:
-                        current_price = float(parts[3])
-                        prev_close = float(parts[2])
-                        open_price = float(parts[1])
-                        self.generate_mock_intraday_data(prev_close, open_price)
-                        self.plot_charts(current_price, prev_close, open_price)
-                        return
-        except Exception as e:
-            print(f"从新浪API加载数据失败: {e}")
-
-        # 新浪API失败，尝试从腾讯API获取今日真实数据
-        try:
-            real_data = self.get_today_real_data()
-            if real_data:
-                print(f"使用腾讯API获取的真实数据生成分时图: 开{real_data['open']} 高{real_data['high']} 低{real_data['low']} 收{real_data['close']}")
-                self.generate_realistic_intraday_data(real_data)
-                self.plot_charts(real_data['close'], real_data['prev_close'], real_data['open'])
-                return
-        except Exception as e:
-            print(f"从腾讯API获取数据失败: {e}")
-
-        # 最终使用默认模拟数据（仅在所有API都失败时）
-        print("警告: 所有API都失败，使用默认模拟数据")
-        self.generate_mock_intraday_data(100.0, 101.0)
-        self.plot_charts(101.5, 100.0, 101.0)
-
-    def get_today_real_data(self):
-        """从腾讯API获取今日真实数据"""
-        try:
-            # 判断代码是否已包含前缀
-            if self.stock_code.startswith('sh') or self.stock_code.startswith('sz'):
-                code_with_prefix = self.stock_code
-            else:
-                code_prefix = "sh" if self.stock_code.startswith(("6", "5")) else "sz"
-                code_with_prefix = f"{code_prefix}{self.stock_code}"
-
-            api_url = f"http://qt.gtimg.cn/q={code_with_prefix}"
-            response = requests.get(api_url, timeout=10, proxies={'http': None, 'https': None})
-
-            if response.status_code == 200:
-                content = response.content.decode('gbk').strip()
-                if '~' in content:
-                    data = content.split('~')
-                    if len(data) > 34:
-                        return {
-                            'open': float(data[5]),      # 今开
-                            'close': float(data[3]),     # 现价
-                            'high': float(data[33]),     # 今日最高
-                            'low': float(data[34]),      # 今日最低
-                            'volume': int(data[36]),     # 成交量
-                            'prev_close': float(data[4]) # 昨收
-                        }
-        except Exception as e:
-            print(f"获取今日数据失败: {e}")
-        return None
-
-    def generate_realistic_intraday_data(self, real_data):
-        """基于真实数据生成模拟分时数据"""
-        base_time = datetime.datetime.now().replace(hour=9, minute=30, second=0, microsecond=0)
-        open_price = real_data['open']
-        close_price = real_data['close']
-        high_price = real_data['high']
-        low_price = real_data['low']
-        total_volume = real_data['volume']
-
-        # 清空数据
-        self.time_data = []
-        self.price_data = []
-        self.volume_data = []
-        self.avg_price_data = []
-
-        # 生成240个数据点（4小时交易时间）
-        import random
-        random.seed(42)  # 固定种子以保持一致性
-
-        current_price = open_price
-        remaining_volume = total_volume
-        num_points = 0
-
-        for i in range(240):
-            current_time = base_time + datetime.timedelta(minutes=i)
-
-            # 跳过午休时间 11:30-13:00
-            hour_minute = current_time.hour + current_time.minute / 60
-            if not (9.5 <= hour_minute < 11.5 or 13 <= hour_minute < 15):
-                continue
-
-            # 模拟价格走势：从开盘价到收盘价
-            progress = (num_points + 1) / 120  # 假设约120个有效点
-            target_price = open_price + (close_price - open_price) * progress
-
-            # 添加随机波动，但限制在高低价范围内
-            volatility = (high_price - low_price) * 0.1
-            random_change = random.uniform(-volatility, volatility)
-            current_price = max(low_price, min(high_price, target_price + random_change))
-
-            # 模拟成交量（早尾成交量大，中间小）
-            volume_factor = 1.0
-            if num_points < 30:  # 开盘
-                volume_factor = 1.5
-            elif num_points > 90:  # 收盘
-                volume_factor = 1.3
-            elif 30 <= num_points <= 40 or 80 <= num_points <= 90:  # 午休前后
-                volume_factor = 0.5
-
-            point_volume = int((total_volume / 120) * volume_factor * random.uniform(0.8, 1.2))
-            remaining_volume -= point_volume
-
-            # 最后一个点补齐剩余成交量
-            if num_points == 119:
-                point_volume = max(0, point_volume + remaining_volume)
-
-            # 计算均价
-            self.time_data.append(current_time)
-            self.price_data.append(current_price)
-            self.volume_data.append(point_volume)
-
-            # 计算累计均价
-            if len(self.price_data) > 0:
-                total_amount = sum(p * v for p, v in zip(self.price_data, self.volume_data))
-                total_vol = sum(self.volume_data)
-                avg_price = total_amount / total_vol if total_vol > 0 else current_price
-                self.avg_price_data.append(avg_price)
-
-            num_points += 1
-    
-    def parse_intraday_data(self, data: list, code: str, name: str):
-        """解析分时数据"""
-        self.time_data = []
-        self.price_data = []
-        self.volume_data = []
-        self.avg_price_data = []
-        
-        # 数据格式：[时间, 价格, 均价, 成交量, 持仓量, 日期]
-        # 时间格式：930, 931, ... 930表示09:30
-        today = datetime.datetime.now().date()
-        
-        for item in data:
-            if len(item) >= 4:
-                try:
-                    time_str = str(item[0])
-                    if len(time_str) == 3 or len(time_str) == 4:
-                        # 解析时间 930 -> 09:30, 1330 -> 13:30
-                        if len(time_str) == 3:
-                            hour = int(time_str[0])
-                            minute = int(time_str[1:3])
-                        else:
-                            hour = int(time_str[0:2])
-                            minute = int(time_str[2:4])
-                        
-                        # 跳过无效时间（午休时间）
-                        if 11 <= hour < 13:
-                            continue
-                        
-                        dt = datetime.datetime.combine(today, datetime.time(hour, minute))
-                        
-                        price = float(item[1]) if item[1] else 0
-                        avg_price = float(item[2]) if item[2] else 0
-                        volume = int(item[3]) if item[3] else 0
-                        
-                        if price > 0:
-                            self.time_data.append(dt)
-                            self.price_data.append(price)
-                            self.avg_price_data.append(avg_price)
-                            self.volume_data.append(volume)
-                except (ValueError, IndexError) as e:
-                    continue
-        
-        if self.price_data:
-            prev_close = self.price_data[0]
-            current_price = self.price_data[-1]
-            open_price = self.avg_price_data[0] if self.avg_price_data else prev_close
-            self.plot_charts(current_price, prev_close, open_price)
-
-    # ========== 深色主题公共样式 ==========
-
-    _UP_COLOR = '#ef5350'
-    _DOWN_COLOR = '#26a69a'
-    _BG = '#131722'
-    _GRID = '#1e222d'
-    _TEXT_DIM = '#787b86'
-    _TEXT = '#d1d4dc'
-
-    def _setup_axis(self, ax, show_xlabels=True):
-        """统一设置深色坐标轴"""
-        ax.set_facecolor(self._BG)
-        ax.tick_params(labelsize=8, colors=self._TEXT_DIM, direction='in', length=2,
-                       top=False, bottom=True, left=False, right=True)
-        for s in ['top', 'left']:
-            ax.spines[s].set_visible(False)
-        for s in ['right', 'bottom']:
-            ax.spines[s].set_color(self._GRID)
-        ax.yaxis.set_label_position('right')
-        ax.yaxis.tick_right()
-        ax.grid(True, axis='y', color=self._GRID, linewidth=0.4, alpha=0.8)
-        ax.set_axisbelow(True)
-        if not show_xlabels:
-            ax.tick_params(labelbottom=False)
-
-    def _fmt_vol(self, x, p):
-        if x >= 1e8:
-            return f'{x/1e8:.1f}亿'
-        if x >= 1e4:
-            return f'{x/1e4:.0f}万'
-        return f'{int(x)}'
-
-    # ========== 十字光标 ==========
-
-    def _clear_hover(self):
-        for artist in [self.hover_vline, self.hover_hline, self.hover_price_label, self.hover_date_label]:
-            if artist is not None:
-                try:
-                    artist.remove()
-                except Exception:
-                    pass
-        for t in self.hover_info_texts:
-            try:
-                t.remove()
-            except Exception:
-                pass
-        self.hover_info_texts.clear()
-        self.hover_vline = self.hover_hline = self.hover_price_label = self.hover_date_label = None
-
-    def on_hover(self, event):
-        """十字光标悬停（分时图）"""
-        if event.inaxes not in (self.ax_price, self.ax_volume):
-            self._clear_hover()
-            self.canvas.draw_idle()
-            return
-
-        x_data = event.xdata
-        if x_data is None or not self.time_data:
-            self._clear_hover()
-            self.canvas.draw_idle()
-            return
-
-        self._clear_hover()
-
-        idx = int(round(x_data))
-        if idx < 0 or idx >= len(self.time_data):
-            return
-
-        # 竖线
-        self.hover_vline = self.ax_price.axvline(x=self.time_data[idx], color='#758696',
-                                                  linewidth=0.5, linestyle='--', alpha=0.7)
-        # 更新info_label
-        price = self.price_data[idx]
-        vol = self.volume_data[idx]
-        t = self.time_data[idx].strftime('%H:%M')
-        self.info_label.setText(f'{t}  价格:{price:.2f}  量:{vol}')
-        self.canvas.draw_idle()
-
-    # ========== 分时图 ==========
-
-    def generate_mock_intraday_data(self, prev_close: float, open_price: float):
-        """生成模拟分时数据"""
-        base_price = open_price
-        base_time = datetime.datetime.now().replace(hour=9, minute=30, second=0, microsecond=0)
-
-        for i in range(240):
-            current_time = base_time + datetime.timedelta(minutes=i)
-            price_change = (i - 120) * 0.01 * (prev_close / 100)
-            price = base_price + price_change + (i % 10) * 0.02
-            volume = abs(int((100000 + i * 500 + (i % 20) * 1000) * (1 + 0.1 * (i % 3 - 1))))
-
-            if 9.5 <= (current_time.hour + current_time.minute / 60) < 11.5 or \
-               13 <= (current_time.hour + current_time.minute / 60) < 15:
-                self.time_data.append(current_time)
-                self.price_data.append(price)
-                self.volume_data.append(volume)
-
-    def plot_charts(self, current_price: float, prev_close: float, open_price: float):
-        """绘制分时走势图"""
-        self.ax_price.clear()
-        self.ax_volume.clear()
-        self._setup_axis(self.ax_price, show_xlabels=False)
-        self._setup_axis(self.ax_volume, show_xlabels=True)
-
-        if not self.time_data:
-            self.ax_price.text(0.5, 0.5, '暂无数据', ha='center', va='center',
-                              fontsize=14, color=self._TEXT_DIM, transform=self.ax_price.transAxes)
-            self.canvas.draw()
-            return
-
-        price_change = current_price - prev_close
-        price_pct = (price_change / prev_close) * 100 if prev_close > 0 else 0
-        is_up = price_change >= 0
-        color = self._UP_COLOR if is_up else self._DOWN_COLOR
-
-        # 价格线
-        self.ax_price.plot(self.time_data, self.price_data, color=color, linewidth=1.2,
-                          antialiased=True, zorder=3)
-
-        # 渐变填充
-        self.ax_price.fill_between(self.time_data, self.price_data, prev_close,
-                                   where=[p >= prev_close for p in self.price_data],
-                                   color=self._UP_COLOR, alpha=0.06, interpolate=True)
-        self.ax_price.fill_between(self.time_data, self.price_data, prev_close,
-                                   where=[p < prev_close for p in self.price_data],
-                                   color=self._DOWN_COLOR, alpha=0.06, interpolate=True)
-
-        # 均价线
-        if self.avg_price_data and len(self.avg_price_data) == len(self.time_data):
-            self.ax_price.plot(self.time_data, self.avg_price_data,
-                              color='#ffa726', linewidth=0.9, alpha=0.8, antialiased=True)
-
-        # 昨收参考线
-        self.ax_price.axhline(y=prev_close, color=self._TEXT_DIM, linestyle='--',
-                             linewidth=0.6, alpha=0.5)
-
-        # 价格格式
-        self.ax_price.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, p: f'{v:.2f}'))
-        p_min, p_max = min(self.price_data), max(self.price_data)
-        pad = max((p_max - p_min) * 0.1, prev_close * 0.005)
-        self.ax_price.set_ylim(p_min - pad, p_max + pad)
-
-        # 成交量
-        v_colors = []
-        for i in range(len(self.time_data)):
-            prev = prev_close if i == 0 else self.price_data[i - 1]
-            v_colors.append(self._UP_COLOR if self.price_data[i] >= prev else self._DOWN_COLOR)
-        self.ax_volume.bar(self.time_data, self.volume_data, color=v_colors,
-                          width=0.00035, alpha=0.55, edgecolor='none')
-
-        self.ax_volume.xaxis.set_major_locator(MinuteLocator(interval=30))
-        self.ax_volume.xaxis.set_major_formatter(DateFormatter('%H:%M'))
-        self.ax_volume.yaxis.set_major_formatter(plt.FuncFormatter(self._fmt_vol))
-
-        # 更新标题
-        sign = '+' if is_up else ''
-        self.price_label.setText(f'{current_price:.2f}')
-        self.price_label.setStyleSheet(f'font-size: 15px; font-weight: bold; color: {color};')
-        self.change_label.setText(f'{sign}{price_change:.2f}  {sign}{price_pct:.2f}%')
-        self.change_label.setStyleSheet(f'font-size: 13px; font-weight: bold; color: {color};')
-
-        self.canvas.draw()
-
 
 class StockDesktopWidget(QWidget):
     """桌面股票监控窗口"""
@@ -1853,11 +1191,18 @@ class StockDesktopWidget(QWidget):
         self.alerts = []  # 价格预警列表
         self.groups = {}  # 分组 {组名: [股票代码列表]}
         self._current_group = '全部'
+        self._hotkey_id = 1
+        self.hotkey_ctrl = True
+        self.hotkey_shift = True
+        self.hotkey_alt = False
+        self.hotkey_key = 'H'
         self.init_ui()
         self.load_config()
         self._rebuild_group_tabs()
         self.setup_timer()
         self.setup_system_tray()
+        self._register_hotkey()
+        QApplication.instance().aboutToQuit.connect(self._unregister_hotkey)
 
     def init_ui(self):
         """初始化界面"""
@@ -1865,13 +1210,12 @@ class StockDesktopWidget(QWidget):
         self.setWindowTitle('股票监控')
         # 移除 Qt.Tool 标志，这样窗口会显示在任务栏中
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
-        self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setWindowOpacity(0.85)  # 设置窗口透明度 (0-1，1为不透明)
 
         # 主布局（包含标题栏+滚动区域）
         self.main_layout = QVBoxLayout()
-        self.main_layout.setSpacing(5)
-        self.main_layout.setContentsMargins(15, 15, 15, 15)
+        self.main_layout.setSpacing(0)
+        self.main_layout.setContentsMargins(15, 10, 15, 10)
 
         # 标题栏
         title_layout = QHBoxLayout()
@@ -2000,7 +1344,7 @@ class StockDesktopWidget(QWidget):
         # === 分组标签栏 ===
         tab_bar = QHBoxLayout()
         tab_bar.setSpacing(2)
-        tab_bar.setContentsMargins(0, 2, 0, 2)
+        tab_bar.setContentsMargins(0, 0, 0, 0)
 
         self._group_btns = []
         btn_all = QPushButton('全部')
@@ -2046,7 +1390,7 @@ class StockDesktopWidget(QWidget):
         # 滚动内容的容器
         self.scroll_content = QWidget()
         self.content_layout = QVBoxLayout()
-        self.content_layout.setSpacing(5)
+        self.content_layout.setSpacing(2)
         self.content_layout.setContentsMargins(0, 0, 0, 0)
         self.scroll_content.setLayout(self.content_layout)
         self.scroll_area.setWidget(self.scroll_content)
@@ -2074,6 +1418,12 @@ class StockDesktopWidget(QWidget):
             self.refresh_interval = config.get('refresh_interval', 5)
             self.alerts = config.get('alerts', [])
             self.groups = config.get('groups', {})
+            # 快捷键设置
+            hk = config.get('hotkey', {})
+            self.hotkey_ctrl = hk.get('ctrl', True)
+            self.hotkey_shift = hk.get('shift', True)
+            self.hotkey_alt = hk.get('alt', False)
+            self.hotkey_key = hk.get('key', 'H')
             # 应用加载的设置
             self.setWindowOpacity(self.window_opacity)
         except:
@@ -2084,6 +1434,10 @@ class StockDesktopWidget(QWidget):
             self.refresh_interval = 5
             self.alerts = []
             self.groups = {}
+            self.hotkey_ctrl = True
+            self.hotkey_shift = True
+            self.hotkey_alt = False
+            self.hotkey_key = 'H'
 
     def save_config(self):
         """保存配置文件"""
@@ -2094,7 +1448,13 @@ class StockDesktopWidget(QWidget):
                 'opacity': self.window_opacity,
                 'refresh_interval': self.refresh_interval,
                 'alerts': self.alerts,
-                'groups': self.groups
+                'groups': self.groups,
+                'hotkey': {
+                    'ctrl': self.hotkey_ctrl,
+                    'shift': self.hotkey_shift,
+                    'alt': self.hotkey_alt,
+                    'key': self.hotkey_key
+                }
             }
             with open('config.json', 'w', encoding='utf-8') as f:
                 json.dump(config, f, ensure_ascii=False, indent=2)
@@ -2132,9 +1492,48 @@ class StockDesktopWidget(QWidget):
             self._rebuild_group_tabs()
             self._switch_group(name)
 
+    def _show_group_menu(self, pos, name, btn):
+        """分组标签右键菜单"""
+        menu = QMenu(self)
+        menu.setStyleSheet('''
+            QMenu { background-color: #ffffff; border: 1px solid #e0e0e0; padding: 4px 0px; }
+            QMenu::item { padding: 6px 28px; color: #333333; }
+            QMenu::item:selected { background-color: #0078d4; color: #ffffff; }
+        ''')
+        rename_action = menu.addAction('重命名')
+        menu.addSeparator()
+        del_action = menu.addAction('删除分组')
+        action = menu.exec_(btn.mapToGlobal(pos))
+        if action == rename_action:
+            self._rename_group(name)
+        elif action == del_action:
+            self._remove_group(name)
+
+    def _rename_group(self, old_name):
+        """重命名分组"""
+        new_name, ok = _chinese_input_dialog(self, '重命名分组', '新名称：', old_name)
+        if ok and new_name and new_name != old_name:
+            if new_name in self.groups or new_name == '全部':
+                return
+            codes = self.groups.pop(old_name)
+            self.groups[new_name] = codes
+            if self._current_group == old_name:
+                self._current_group = new_name
+            self.save_config()
+            self._rebuild_group_tabs()
+
     def _remove_group(self, name):
         """删除分组"""
         if name in self.groups:
+            msg = QMessageBox(self)
+            msg.setWindowTitle('删除分组')
+            msg.setText(f'确定删除分组「{name}」吗？\n该分组下的股票不会被删除。')
+            msg.setIcon(QMessageBox.Question)
+            yes_btn = msg.addButton('确定', QMessageBox.YesRole)
+            msg.addButton('取消', QMessageBox.NoRole)
+            msg.exec_()
+            if msg.clickedButton() != yes_btn:
+                return
             del self.groups[name]
             self.save_config()
             self._rebuild_group_tabs()
@@ -2164,9 +1563,9 @@ class StockDesktopWidget(QWidget):
                 QPushButton:checked { background: #0078d4; color: #ffffff; border-radius: 2px; }
             ''')
             btn.clicked.connect(lambda _, n=name: self._switch_group(n))
-            # 右键删除分组
+            # 右键菜单：重命名/删除
             btn.setContextMenuPolicy(Qt.CustomContextMenu)
-            btn.customContextMenuRequested.connect(lambda _, n=name: self._remove_group(n))
+            btn.customContextMenuRequested.connect(lambda pos, n=name, b=btn: self._show_group_menu(pos, n, b))
             self._tab_bar_layout.insertWidget(insert_idx + i, btn)
             self._group_btns.append((name, btn))
 
@@ -2184,10 +1583,17 @@ class StockDesktopWidget(QWidget):
 
     def show_settings_dialog(self):
         """显示设置对话框"""
-        dialog = SettingsDialog(self.window_opacity, self.refresh_interval, self)
+        dialog = SettingsDialog(self.window_opacity, self.refresh_interval,
+                                self.hotkey_ctrl, self.hotkey_shift,
+                                self.hotkey_alt, self.hotkey_key, self)
         if dialog.exec_() == QDialog.Accepted:
-            self.window_opacity, self.refresh_interval = dialog.get_settings()
+            (self.window_opacity, self.refresh_interval,
+             self.hotkey_ctrl, self.hotkey_shift,
+             self.hotkey_alt, self.hotkey_key) = dialog.get_settings()
             self.setWindowOpacity(self.window_opacity)
+            # 重新注册快捷键
+            self._unregister_hotkey()
+            self._register_hotkey()
             self.save_config()
             # 重启定时器
             self.timer.stop()
@@ -2263,9 +1669,9 @@ class StockDesktopWidget(QWidget):
         self.save_config()
 
     def show_stock_detail(self, stock_code: str, stock_name: str):
-        """显示股票详情对话框"""
-        dialog = StockDetailDialog(stock_code, stock_name, self)
-        dialog.exec_()
+        """显示K线/分时对话框"""
+        dialog = KLineDialog(stock_code, stock_name, self)
+        dialog.show()
 
     def search_stocks(self, keyword: str) -> list:
         """搜索股票（根据代码或名称）- 使用新浪API"""
@@ -2357,9 +1763,12 @@ class StockDesktopWidget(QWidget):
 
     def update_stock_display(self):
         """更新股票显示"""
-        # 清除旧的股票标签
-        for widget in self.stock_widgets:
-            widget.deleteLater()
+        # 清空整个 content_layout（包括旧的 stretch）
+        while self.content_layout.count():
+            item = self.content_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
         self.stock_widgets.clear()
 
         # 添加标题行
@@ -2462,6 +1871,53 @@ class StockDesktopWidget(QWidget):
         if event.buttons() == Qt.LeftButton and hasattr(self, 'drag_position') and self.drag_position:
             self.move(event.globalPos() - self.drag_position)
             event.accept()
+
+    def keyPressEvent(self, event):
+        """键盘事件 - ESC隐藏窗口"""
+        if event.key() == Qt.Key_Escape:
+            self.hide()
+        else:
+            super().keyPressEvent(event)
+
+    def nativeEvent(self, eventType, message):
+        """捕获Windows全局热键消息"""
+        if eventType == b'windows_generic_MSG':
+            msg = ctypes.wintypes.MSG.from_address(int(message))
+            if msg.message == 0x0312:  # WM_HOTKEY
+                if msg.wParam == self._hotkey_id:
+                    if self.isVisible():
+                        self.hide()
+                    else:
+                        self.show()
+                        self.raise_()
+                        self.activateWindow()
+                    return True, 0
+        return super().nativeEvent(eventType, message)
+
+    def _register_hotkey(self):
+        """注册全局热键显示/隐藏"""
+        try:
+            mod = 0
+            if self.hotkey_ctrl:
+                mod |= 0x0001  # MOD_CONTROL
+            if self.hotkey_shift:
+                mod |= 0x0004  # MOD_SHIFT
+            if self.hotkey_alt:
+                mod |= 0x0002  # MOD_ALT
+            if mod == 0:
+                mod = 0x0001  # 至少一个修饰键，默认Ctrl
+            vk = ord(self.hotkey_key.upper())
+            ctypes.windll.user32.RegisterHotKey(
+                int(self.winId()), self._hotkey_id, mod, vk)
+        except Exception:
+            pass
+
+    def _unregister_hotkey(self):
+        """注销全局热键"""
+        try:
+            ctypes.windll.user32.UnregisterHotKey(int(self.winId()), self._hotkey_id)
+        except Exception:
+            pass
 
     def closeEvent(self, event):
         """关闭事件"""
