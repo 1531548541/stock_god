@@ -1188,12 +1188,15 @@ class KLineDialog(QDialog):
             self._temp_line = None
 
     def _on_key(self, event):
-        """键盘事件 - Esc取消画线"""
+        """键盘事件 - Esc关闭或取消画线"""
         if event.key == 'escape':
-            self._draw_clicks.clear()
-            self._remove_temp_line()
-            self._switch_tool('hover')
-            self.canvas.draw_idle()
+            if self._tool_mode != 'hover':
+                self._draw_clicks.clear()
+                self._remove_temp_line()
+                self._switch_tool('hover')
+                self.canvas.draw_idle()
+            else:
+                self.close()
 
     def _redraw_tools(self):
         """重绘所有画线（在 _draw 之后调用）"""

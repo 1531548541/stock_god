@@ -25,5 +25,11 @@
       "002050",
       "600893"
     ]
+  },
+  "hotkey": {
+    "ctrl": true,
+    "shift": false,
+    "alt": true,
+    "key": "H"
   }
 }

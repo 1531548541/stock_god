@@ -6,6 +6,7 @@
 
 import sys
 import json
+import ctypes
 import requests
 from kline_chart import KLineDialog
 from datetime import datetime
@@ -485,16 +486,22 @@ class StockManageDialog(QDialog):
 class SettingsDialog(QDialog):
     """设置对话框 - 支持配置透明度、刷新间隔等"""
 
-    def __init__(self, opacity: float, refresh_interval: int, parent=None):
+    def __init__(self, opacity: float, refresh_interval: int,
+                 hotkey_ctrl=True, hotkey_shift=True, hotkey_alt=False, hotkey_key='H',
+                 parent=None):
         super().__init__(parent)
         self.opacity = opacity
         self.refresh_interval = refresh_interval
+        self.hotkey_ctrl = hotkey_ctrl
+        self.hotkey_shift = hotkey_shift
+        self.hotkey_alt = hotkey_alt
+        self.hotkey_key = hotkey_key
         self.init_ui()
 
     def init_ui(self):
         """初始化界面"""
         self.setWindowTitle('设置')
-        self.setFixedSize(350, 250)
+        self.setFixedSize(350, 320)
         self.setStyleSheet('''
             QDialog {
                 background-color: #ffffff;
@@ -575,6 +582,35 @@ class SettingsDialog(QDialog):
         interval_layout.addStretch()
         layout.addLayout(interval_layout)
 
+        # 快捷键设置
+        hotkey_label = QLabel('全局快捷键（显示/隐藏窗口）：')
+        hotkey_label.setStyleSheet('font-size: 14px;')
+        layout.addWidget(hotkey_label)
+
+        hotkey_layout = QHBoxLayout()
+        from PyQt5.QtWidgets import QCheckBox
+        self._hk_ctrl = QCheckBox('Ctrl')
+        self._hk_ctrl.setChecked(self.hotkey_ctrl)
+        hotkey_layout.addWidget(self._hk_ctrl)
+        self._hk_shift = QCheckBox('Shift')
+        self._hk_shift.setChecked(self.hotkey_shift)
+        hotkey_layout.addWidget(self._hk_shift)
+        self._hk_alt = QCheckBox('Alt')
+        self._hk_alt.setChecked(self.hotkey_alt)
+        hotkey_layout.addWidget(self._hk_alt)
+        self._hk_key = QLineEdit(self.hotkey_key)
+        self._hk_key.setFixedWidth(40)
+        self._hk_key.setMaxLength(1)
+        self._hk_key.setAlignment(Qt.AlignCenter)
+        self._hk_key.setStyleSheet('''
+            QLineEdit { border: 1px solid #e0e0e0; border-radius: 4px;
+                        padding: 4px; font-size: 14px; font-weight: bold; text-transform: uppercase; }
+            QLineEdit:focus { border: 1px solid #0078d4; }
+        ''')
+        hotkey_layout.addWidget(self._hk_key)
+        hotkey_layout.addStretch()
+        layout.addLayout(hotkey_layout)
+
         # 说明文字
         info_label = QLabel('提示：透明度50%-100%，数字越小越透明')
         info_label.setStyleSheet('color: #888888; font-size: 12px;')
@@ -607,7 +643,9 @@ class SettingsDialog(QDialog):
 
     def get_settings(self):
         """获取设置"""
-        return self.opacity, self.interval_spinbox.value()
+        return (self.opacity, self.interval_spinbox.value(),
+                self._hk_ctrl.isChecked(), self._hk_shift.isChecked(),
+                self._hk_alt.isChecked(), self._hk_key.text().strip().upper() or 'H')
 
 
 class AlertDialog(QDialog):
@@ -1153,11 +1191,18 @@ class StockDesktopWidget(QWidget):
         self.alerts = []  # 价格预警列表
         self.groups = {}  # 分组 {组名: [股票代码列表]}
         self._current_group = '全部'
+        self._hotkey_id = 1
+        self.hotkey_ctrl = True
+        self.hotkey_shift = True
+        self.hotkey_alt = False
+        self.hotkey_key = 'H'
         self.init_ui()
         self.load_config()
         self._rebuild_group_tabs()
         self.setup_timer()
         self.setup_system_tray()
+        self._register_hotkey()
+        QApplication.instance().aboutToQuit.connect(self._unregister_hotkey)
 
     def init_ui(self):
         """初始化界面"""
@@ -1165,7 +1210,6 @@ class StockDesktopWidget(QWidget):
         self.setWindowTitle('股票监控')
         # 移除 Qt.Tool 标志，这样窗口会显示在任务栏中
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
-        self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setWindowOpacity(0.85)  # 设置窗口透明度 (0-1，1为不透明)
 
         # 主布局（包含标题栏+滚动区域）
@@ -1374,6 +1418,12 @@ class StockDesktopWidget(QWidget):
             self.refresh_interval = config.get('refresh_interval', 5)
             self.alerts = config.get('alerts', [])
             self.groups = config.get('groups', {})
+            # 快捷键设置
+            hk = config.get('hotkey', {})
+            self.hotkey_ctrl = hk.get('ctrl', True)
+            self.hotkey_shift = hk.get('shift', True)
+            self.hotkey_alt = hk.get('alt', False)
+            self.hotkey_key = hk.get('key', 'H')
             # 应用加载的设置
             self.setWindowOpacity(self.window_opacity)
         except:
@@ -1384,6 +1434,10 @@ class StockDesktopWidget(QWidget):
             self.refresh_interval = 5
             self.alerts = []
             self.groups = {}
+            self.hotkey_ctrl = True
+            self.hotkey_shift = True
+            self.hotkey_alt = False
+            self.hotkey_key = 'H'
 
     def save_config(self):
         """保存配置文件"""
@@ -1394,7 +1448,13 @@ class StockDesktopWidget(QWidget):
                 'opacity': self.window_opacity,
                 'refresh_interval': self.refresh_interval,
                 'alerts': self.alerts,
-                'groups': self.groups
+                'groups': self.groups,
+                'hotkey': {
+                    'ctrl': self.hotkey_ctrl,
+                    'shift': self.hotkey_shift,
+                    'alt': self.hotkey_alt,
+                    'key': self.hotkey_key
+                }
             }
             with open('config.json', 'w', encoding='utf-8') as f:
                 json.dump(config, f, ensure_ascii=False, indent=2)
@@ -1523,10 +1583,17 @@ class StockDesktopWidget(QWidget):
 
     def show_settings_dialog(self):
         """显示设置对话框"""
-        dialog = SettingsDialog(self.window_opacity, self.refresh_interval, self)
+        dialog = SettingsDialog(self.window_opacity, self.refresh_interval,
+                                self.hotkey_ctrl, self.hotkey_shift,
+                                self.hotkey_alt, self.hotkey_key, self)
         if dialog.exec_() == QDialog.Accepted:
-            self.window_opacity, self.refresh_interval = dialog.get_settings()
+            (self.window_opacity, self.refresh_interval,
+             self.hotkey_ctrl, self.hotkey_shift,
+             self.hotkey_alt, self.hotkey_key) = dialog.get_settings()
             self.setWindowOpacity(self.window_opacity)
+            # 重新注册快捷键
+            self._unregister_hotkey()
+            self._register_hotkey()
             self.save_config()
             # 重启定时器
             self.timer.stop()
@@ -1804,6 +1871,53 @@ class StockDesktopWidget(QWidget):
         if event.buttons() == Qt.LeftButton and hasattr(self, 'drag_position') and self.drag_position:
             self.move(event.globalPos() - self.drag_position)
             event.accept()
+
+    def keyPressEvent(self, event):
+        """键盘事件 - ESC隐藏窗口"""
+        if event.key() == Qt.Key_Escape:
+            self.hide()
+        else:
+            super().keyPressEvent(event)
+
+    def nativeEvent(self, eventType, message):
+        """捕获Windows全局热键消息"""
+        if eventType == b'windows_generic_MSG':
+            msg = ctypes.wintypes.MSG.from_address(int(message))
+            if msg.message == 0x0312:  # WM_HOTKEY
+                if msg.wParam == self._hotkey_id:
+                    if self.isVisible():
+                        self.hide()
+                    else:
+                        self.show()
+                        self.raise_()
+                        self.activateWindow()
+                    return True, 0
+        return super().nativeEvent(eventType, message)
+
+    def _register_hotkey(self):
+        """注册全局热键显示/隐藏"""
+        try:
+            mod = 0
+            if self.hotkey_ctrl:
+                mod |= 0x0001  # MOD_CONTROL
+            if self.hotkey_shift:
+                mod |= 0x0004  # MOD_SHIFT
+            if self.hotkey_alt:
+                mod |= 0x0002  # MOD_ALT
+            if mod == 0:
+                mod = 0x0001  # 至少一个修饰键，默认Ctrl
+            vk = ord(self.hotkey_key.upper())
+            ctypes.windll.user32.RegisterHotKey(
+                int(self.winId()), self._hotkey_id, mod, vk)
+        except Exception:
+            pass
+
+    def _unregister_hotkey(self):
+        """注销全局热键"""
+        try:
+            ctypes.windll.user32.UnregisterHotKey(int(self.winId()), self._hotkey_id)
+        except Exception:
+            pass
 
     def closeEvent(self, event):
         """关闭事件"""
